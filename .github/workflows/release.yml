@@ -1,0 +1,19 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build Release Artifacts
+        run: |
+          zig build -Drelease-safe
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: zig-out/bin/qz

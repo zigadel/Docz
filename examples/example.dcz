@@ -1,0 +1,9 @@
+@meta(title="Docz Guide", author="Team") @end
+@heading(level=2) Welcome @end
+@code(language="zig")
+const x = 42;
+@end
+@math()
+E = mc^2
+@end
+@image(src="img/logo.png") @end

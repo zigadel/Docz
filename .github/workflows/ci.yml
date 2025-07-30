@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Zig
+        run: |
+          sudo apt update && sudo apt install -y curl
+          curl -L https://ziglang.org/download/index.json | grep 'tarball' # Replace with actual install
+      - name: Build
+        run: zig build
+      - name: Test
+        run: zig build test
+      - name: Lint
+        run: zig fmt --check .

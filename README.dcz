@@ -1,0 +1,355 @@
+@meta(
+    title="Docz: The Future of Documentation",
+    author="Quartz Team",
+    version="1.0",
+    tags="documentation, docz, quartz"
+)
+
+@style-def()
+heading-level-1: font-size=36px, font-weight=bold, color=#222
+heading-level-2: font-size=28px, color=#444
+body-text: font-family="Inter", line-height=1.6
+code-block: font-family="Fira Code", font-size=14px
+@end
+
+@heading(level=1) Docz: The Future of Documentation
+
+@heading(level=2) 1. Introduction
+Docz is a next-generation document format designed to replace outdated standards like Markdown, LaTeX, and Jupyter notebooks.
+
+@heading(level=3) Why It Exists
+- Human readability like Markdown.
+- Mathematical expressiveness like LaTeX.
+- Computational interactivity like Jupyter.
+
+@heading(level=3) Why Not Markdown?
+- Limited expressiveness for scientific content.
+- Poor AI parsing due to ambiguous syntax.
+- No built-in interactivity or styling control.
+
+@heading(level=3) Why Not LaTeX?
+- Powerful but rigid and hard to learn.
+- Outdated for modern web and collaboration.
+
+@heading(level=3) Why Not Jupyter Notebooks?
+- Good for code, bad for structure.
+- Fragile, bloated notebooks with hidden state issues.
+
+Docz bridges these gaps:
+- AI-friendly, directive-based syntax.
+- Native math + media + interactivity.
+- Graph-based modular composition.
+
+---
+
+@heading(level=2) 2. Project Status & Vision
+**Status:** Docz is in active development.  
+**Goal:** Replace Markdown, LaTeX, and Jupyter with a unified, future-proof format for documentation, math, and computation.  
+**Ecosystem Includes:**
+- Quartz: Modern editor for Docz.
+- VSCode Extension: Live preview, IntelliSense, auto-formatting.
+- Zig Core: Parser, CLI, WASM execution engine.
+
+---
+
+@heading(level=2) 3. Quick Start
+@code(language="shell")
+curl -fsSL https://get.quartz.dev/install.sh | sh
+qz new README.dcz
+qz preview README.dcz
+@end
+
+---
+
+@heading(level=2) 4. Core Concepts
+Docz is:
+- Declarative.
+- Composable.
+- Extensible.
+
+Quartz runtime:
+- Parses `.dcz` → AST.
+- Executes code in WASM sandbox.
+- Renders UI in SvelteKit.
+
+@heading(level=3) Why Docz is Different
+@table
+Feature | Markdown | LaTeX | Jupyter | Docz
+Math Support | Basic | Full | Full | Full
+Interactivity | No | No | Yes | Yes
+AI-Friendly | No | No | Limited | Yes
+Extensible Plugins | No | No | Limited | Yes
+WASM Execution | No | No | No | Yes
+@end
+
+---
+
+@heading(level=2) 5. File Structure
+@heading(level=3) Minimal Example
+@code(language="text")
+@meta(title="Docz Example", author="Quartz Team")
+
+@heading(level=1) Introduction
+Docz is the future of documentation.
+
+@code(language="zig", execute=true)
+const x: i32 = 42;
+@print(x);
+@end
+@end
+
+@heading(level=3) Monograph
+@code(language="text")
+main.dcz
+chapters/
+    intro.dcz
+    methodology.dcz
+@end
+
+main.dcz:
+@code(language="text")
+@import("chapters/intro.dcz")
+@import("chapters/methodology.dcz")
+@import("chapters/results.dcz")
+@end
+
+---
+
+@heading(level=2) 6. Directives Overview
+
+@table
+Directive | Purpose
+@meta | Document metadata
+@heading | Section headings
+@import | Include other files
+@style | Inline styling
+@style-def | Global styles
+@code | Code blocks
+@data | Structured datasets
+@math | Math notation
+@plot | Data/function plots
+@graph | Graphs/DAGs
+@image | Embed images
+@video | Embed videos
+@audio | Embed audio
+@pdf | Embed PDFs
+@embed | Interactive content
+@logic | Client-side behavior
+@end
+
+---
+
+@heading(level=2) 7. Syntax Rules
+Docz syntax is explicit, minimal, and consistent.
+
+@heading(level=3) Inline Directives
+- Single-line usage.
+- No @end required.
+- Examples: @heading, @image, @video, @audio.
+
+@code(language="text")
+@heading(level=2) Introduction
+@image(src="diagram.png")
+@end
+
+@heading(level=3) Block Directives
+- Multi-line content.
+- Must close with @end.
+- Examples: @code, @style, @style-def, @logic, @math, @plot, @graph, @embed.
+
+@code(language="text")
+@code(language="zig", execute=true)
+const x: i32 = 42;
+@print(x);
+@end
+@end
+
+@heading(level=3) Attribute Syntax
+- Use key=value format.
+- Quotes optional for simple strings, required for spaces.
+
+Example:
+@code(language="text")
+@style(font-size=18px, color="dark blue")
+@end
+
+@heading(level=3) Nesting Rules
+- Block directives cannot be nested unless explicitly supported.
+- Example of allowed future nesting: @plot inside @math.
+
+@heading(level=3) Imports
+- @import("file.dcz") must appear at the top or inside a composition file.
+
+@heading(level=3) Comments
+- Use // for single-line comments.
+@code(language="text")
+// This is a comment
+@end
+
+---
+
+@heading(level=2) 8. Styling System
+@heading(level=3) Inline Style
+The @style(color=blue, bold) harmonic field @end emerges.
+
+@heading(level=3) Block Style
+@style(font-size=18px, font-family="Inter")
+This paragraph uses custom styling.
+@end
+
+@heading(level=3) Global Styles
+@style-def()
+heading-level-1: font-size=36px, font-weight=bold, color=#000
+body-text: font-family="Inter", line-height=1.6
+@end
+
+---
+
+@heading(level=2) 9. Execution Model
+@code(language="zig", execute=true)
+const nums = [_]i32{1,2,3,4,5};
+const sum = @reduce(.Add, nums);
+@print(sum);
+@end
+
+---
+
+@heading(level=2) 10. Media & Interactivity
+
+@heading(level=3) Static Media
+@image(src="figures/diagram.png", width="600px", caption="System Architecture")
+@end
+
+@video(src="clips/demo.mp4", width="800px", controls=true)
+@end
+
+@audio(src="audio/explanation.wav", controls=true)
+@end
+
+@heading(level=3) Dynamic Content
+@embed(type="zeno-scene", source="scenes/fluid.zscene", width="800px", height="600px", interactive=true)
+@end
+
+@heading(level=3) Lightweight Logic
+@image(src="diagram.png", onClick="play('narration')")
+@end
+
+@audio(id="narration", src="audio/explanation.wav", controls=false)
+@end
+
+@logic()
+function play(id) {
+    const audio = document.getElementById(id);
+    audio.play();
+}
+@end
+
+@heading(level=3) Advanced Media Options
+All media directives support:
+- width, height → Size control.
+- align → left, center, right.
+- responsive=true → Auto-resize.
+
+Example:
+@image(src="diagram.png", width="600px", align="center", responsive=true)
+@end
+
+@heading(level=4) Zeno Engine Integration
+@embed(type="zeno-scene", source="scenes/fluid.zscene", width="900px", height="600px", interactive=true)
+@end
+
+
+---
+
+@heading(level=2) 11. Composition & Imports
+@code(language="text")
+@import("chapters/intro.dcz")
+@import("chapters/methodology.dcz")
+@end
+
+---
+
+@heading(level=2) 12. Graph & ZUQL
+@graph(type="imports")
+nodes:
+    - main.dcz
+    - intro.dcz
+edges:
+    - main.dcz -> intro.dcz
+@end
+
+ZUQL query example:
+@code(language="text")
+SELECT docs WHERE tag="math" AND status="draft";
+@end
+
+---
+
+@heading(level=2) 13. Plugin System
+@code(language="shell")
+qz install plugin-zeno
+qz install plugin-3d-model
+@end
+
+---
+
+@heading(level=2) 14. Architecture
+@diagram(type="flow")
+Docz (.dcz) → Quartz Parser → WASM Core → SvelteKit UI
+@end
+
+---
+
+@heading(level=2) 15. CLI Reference
+@table
+Command | Description
+qz new | Create a new Docz file
+qz preview | Live preview
+qz build | Export HTML/PDF
+qz install | Install plugins
+@end
+
+---
+
+@heading(level=2) 16. Examples
+
+@heading(level=3) Math + Plot
+@math()
+E = mc^2
+@end
+
+@plot(type="line")
+x: [1,2,3,4,5]
+y: [1,4,9,16,25]
+@end
+
+---
+
+@heading(level=2) 17. Roadmap
+- Real-time collaboration
+- AI-assisted formatting
+- Plugin marketplace
+- Native Quartz: Zig + WebGPU
+
+---
+
+@heading(level=2) 18. Tooling & Extensions
+- VSCode Extension: Live preview like Markdown, IntelliSense for Docz directives, auto-formatting & linting powered by the Zig parser (via WASM).
+- Quartz Integration: Full interactive editor built on SvelteKit.
+
+---
+
+@heading(level=2) 19. Contributing
+- Written in Zig with strict tests
+- Extend via plugins
+
+@heading(level=3) Development Workflow
+- Parser & CLI written in Zig.
+- 100% test coverage on AST parser.
+- `.github/` folder includes:
+    - Issue & PR templates.
+    - CI workflows (build, test, release).
+- Run tests:
+@code(language="shell")
+zig build test
+@end

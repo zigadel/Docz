@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://docz.dev/docs # https://www.namecheap.com/domains/registration/results/?domain=docz
+    about: Read the official documentation
+  - name: Discussions
+    url: https://github.com/zigadel/docz/discussions
+    about: Ask questions or start a discussion
