@@ -100,6 +100,7 @@ fn handleBuild(file_path: []const u8) !void {
 // ----------------------
 // Tests
 // ----------------------
+
 test "CLI usage message prints" {
     var fbs = std.io.fixedBufferStream([]u8{0} ** 1024);
     const writer = fbs.writer();
