@@ -4,7 +4,7 @@ const TokenType = @import("tokenizer.zig").TokenType;
 const ASTNode = @import("ast.zig").ASTNode;
 const NodeType = @import("ast.zig").NodeType;
 
-pub fn parse(tokens: []const Token, allocator: *std.mem.Allocator) !ASTNode {
+pub fn parse(tokens: []const Token, allocator: std.mem.Allocator) !ASTNode {
     var root = ASTNode.init(allocator, NodeType.Document);
 
     var i: usize = 0;
@@ -62,7 +62,7 @@ pub fn parse(tokens: []const Token, allocator: *std.mem.Allocator) !ASTNode {
 
 test "Parse multiple directives" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer std.debug.assert(!gpa.deinit());
+    defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
 
     const tokenizer = @import("tokenizer.zig");
@@ -76,8 +76,14 @@ test "Parse multiple directives" {
     const tokens = try tokenizer.tokenize(input, allocator);
     defer allocator.free(tokens);
 
-    const ast = try parse(tokens, allocator);
-    defer ast.children.deinit();
+    var ast = try parse(tokens, allocator);
+    defer {
+        for (ast.children.items) |*child| {
+            child.attributes.deinit();
+            child.children.deinit();
+        }
+        ast.children.deinit();
+    }
 
     try std.testing.expect(ast.children.items.len >= 3);
     try std.testing.expectEqual(ast.children.items[0].node_type, NodeType.Meta);

@@ -1,6 +1,0 @@
-.DS_Store
-
-.zig-cache/
-zig-out/
-.env
-ToDaY.md

@@ -2,7 +2,7 @@ const std = @import("std");
 const ASTNode = @import("../parser/ast.zig").ASTNode;
 const NodeType = @import("../parser/ast.zig").NodeType;
 
-pub fn renderHTML(root: *const ASTNode, allocator: *std.mem.Allocator) ![]u8 {
+pub fn renderHTML(root: *const ASTNode, allocator: std.mem.Allocator) ![]u8 {
     var list = std.ArrayList(u8).init(allocator);
     const writer = list.writer();
 
@@ -11,11 +11,14 @@ pub fn renderHTML(root: *const ASTNode, allocator: *std.mem.Allocator) ![]u8 {
     // Render meta info if present
     for (root.children.items) |node| {
         if (node.node_type == .Meta) {
-            for (node.attributes.iterator()) |entry| {
+            var it = node.attributes.iterator();
+            while (it.next()) |entry| {
                 if (std.mem.eql(u8, entry.key_ptr.*, "title")) {
                     try writer.print("<title>{s}</title>\n", .{entry.value_ptr.*});
                 } else {
-                    try writer.print("<meta name=\"{s}\" content=\"{s}\">\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+                    try writer.print("<meta name=\"{s}\" content=\"{s}\">\n", .{
+                        entry.key_ptr.*, entry.value_ptr.*,
+                    });
                 }
             }
         }
@@ -65,11 +68,17 @@ pub fn renderHTML(root: *const ASTNode, allocator: *std.mem.Allocator) ![]u8 {
 // ----------------------
 test "Render HTML for multiple node types" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer std.debug.assert(!gpa.deinit());
+    defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
 
     var root = ASTNode.init(allocator, NodeType.Document);
-    defer root.children.deinit();
+    defer {
+        for (root.children.items) |*child| {
+            child.attributes.deinit();
+            child.children.deinit();
+        }
+        root.children.deinit();
+    }
 
     var heading = ASTNode.init(allocator, NodeType.Heading);
     try heading.attributes.put("level", "2");

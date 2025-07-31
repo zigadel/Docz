@@ -4,30 +4,24 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Create the root module and specify the main Zig source file
-    const root_module = b.addModule("docz", .{
+    // ✅ CLI module with target + optimize
+    const cli_module = b.createModule(.{
         .root_source_file = b.path("core/cli/main.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    // Create executable using the root module
+    // ✅ Executable (Docz CLI)
     const exe = b.addExecutable(.{
         .name = "docz",
-        .root_module = root_module,
+        .root_module = cli_module,
     });
 
-    // Install CLI binary into zig-out/bin
     b.installArtifact(exe);
 
-    // Add convenient run step
-    const run_cmd = b.addRunArtifact(exe);
-    const run_step = b.step("run", "Run the docz CLI");
-    run_step.dependOn(&run_cmd.step);
-
-    // Add test module for inline Zig tests
-    const test_module = b.addModule("docz_tests", .{
-        .root_source_file = b.path("core/cli/main.zig"),
+    // ✅ Tests aggregate everything via root.zig
+    const test_module = b.createModule(.{
+        .root_source_file = b.path("root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -36,6 +30,10 @@ pub fn build(b: *std.Build) void {
         .root_module = test_module,
     });
 
-    const test_step = b.step("test", "Run all tests");
-    test_step.dependOn(&tests.step);
+    // ✅ Build steps
+    const run_step = b.step("run", "Run the Docz CLI");
+    run_step.dependOn(&b.addRunArtifact(exe).step);
+
+    const test_step = b.step("test", "Run all inline tests");
+    test_step.dependOn(&b.addRunArtifact(tests).step);
 }

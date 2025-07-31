@@ -11,11 +11,12 @@ pub const TokenType = enum {
 pub const Token = struct {
     kind: TokenType,
     lexeme: []const u8,
+    is_allocated: bool = false, // ✅ track ownership
 };
 
 /// Tokenize `.dcz` input into an array of tokens.
-/// Caller owns returned slice.
-pub fn tokenize(input: []const u8, allocator: *std.mem.Allocator) ![]Token {
+/// Caller owns returned slice; must free allocated lexemes where `is_allocated=true`.
+pub fn tokenize(input: []const u8, allocator: std.mem.Allocator) ![]Token {
     var tokens = std.ArrayList(Token).init(allocator);
 
     var i: usize = 0;
@@ -34,13 +35,21 @@ pub fn tokenize(input: []const u8, allocator: *std.mem.Allocator) ![]Token {
             continue;
         }
 
-        // Handle escape sequence @@ → literal "@"
+        // ✅ Escape sequence @@ → literal '@' + rest of word
         if (c == '@' and i + 1 < input.len and input[i + 1] == '@') {
+            i += 2; // skip '@@'
+            const start = i;
+
+            // Grab the rest of the word
+            while (i < input.len and !std.ascii.isWhitespace(input[i])) : (i += 1) {}
+            const word = input[start..i];
+
+            const combined = try std.fmt.allocPrint(allocator, "@{s}", .{word});
             try tokens.append(Token{
                 .kind = .Content,
-                .lexeme = "@", // literal
+                .lexeme = combined,
+                .is_allocated = true,
             });
-            i += 2; // skip both '@'
             continue;
         }
 
@@ -58,9 +67,9 @@ pub fn tokenize(input: []const u8, allocator: *std.mem.Allocator) ![]Token {
                 try tokens.append(Token{ .kind = .Directive, .lexeme = directive });
             }
 
-            // Handle parameters in parentheses
+            // Parameters in (...)
             if (i < input.len and input[i] == '(') {
-                i += 1; // skip '('
+                i += 1;
                 while (i < input.len and input[i] != ')') {
                     while (i < input.len and std.ascii.isWhitespace(input[i])) : (i += 1) {}
 
@@ -85,7 +94,7 @@ pub fn tokenize(input: []const u8, allocator: *std.mem.Allocator) ![]Token {
                                 .kind = .ParameterValue,
                                 .lexeme = input[str_start..i],
                             });
-                            if (i < input.len) i += 1; // skip closing quote
+                            if (i < input.len) i += 1;
                         } else {
                             while (i < input.len and !std.ascii.isWhitespace(input[i]) and input[i] != ')') : (i += 1) {}
                             try tokens.append(Token{
@@ -105,7 +114,7 @@ pub fn tokenize(input: []const u8, allocator: *std.mem.Allocator) ![]Token {
             continue;
         }
 
-        // Handle raw content
+        // Raw content
         const content_start = i;
         while (i < input.len and input[i] != '@' and input[i] != '\n') : (i += 1) {}
         if (i > content_start) {
@@ -119,20 +128,34 @@ pub fn tokenize(input: []const u8, allocator: *std.mem.Allocator) ![]Token {
     return tokens.toOwnedSlice();
 }
 
+/// Free all heap allocations in token list.
+pub fn freeTokens(allocator: std.mem.Allocator, tokens: []Token) void {
+    for (tokens) |t| {
+        if (t.is_allocated) allocator.free(t.lexeme);
+    }
+}
+
 // ----------------------
 // Tests
 // ----------------------
-
 test "Tokenize escape sequence @@ as literal @" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer std.debug.assert(!gpa.deinit());
-    const allocator = gpa.allocator();
+    defer std.debug.assert(gpa.deinit() == .ok);
+    var allocator = gpa.allocator();
 
     const input = "Contact @@support@example.com";
     const tokens = try tokenize(input, allocator);
-    defer allocator.free(tokens);
+    defer {
+        freeTokens(allocator, tokens);
+        allocator.free(tokens);
+    }
+
+    std.debug.print("DEBUG TOKENS (len={}):\n", .{tokens.len});
+    for (tokens, 0..) |t, idx| {
+        std.debug.print("  {}: kind={any}, lexeme=\"{s}\"\n", .{ idx, t.kind, t.lexeme });
+    }
 
     try std.testing.expectEqual(@as(usize, 2), tokens.len);
-    try std.testing.expectEqual(tokens[0].kind, TokenType.Content);
-    try std.testing.expectEqualStrings(tokens[0].lexeme, "@");
+    try std.testing.expectEqualStrings(tokens[0].lexeme, "Contact ");
+    try std.testing.expectEqualStrings(tokens[1].lexeme, "@support@example.com");
 }
