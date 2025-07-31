@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
 
     // ✅ CLI module with target + optimize
     const cli_module = b.createModule(.{
-        .root_source_file = b.path("core/cli/main.zig"),
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });

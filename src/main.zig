@@ -1,7 +1,7 @@
 const std = @import("std");
-const tokenizer = @import("../parser/tokenizer.zig");
-const parser = @import("../parser/parser.zig");
-const renderer = @import("../renderer/html.zig");
+const tokenizer = @import("parser/tokenizer.zig");
+const parser = @import("parser/parser.zig");
+const renderer = @import("renderer/html.zig");
 
 /// Global constant for CLI usage text
 pub const USAGE_TEXT =
@@ -14,7 +14,7 @@ pub const USAGE_TEXT =
 
 /// Entry point for CLI
 pub fn main() !void {
-    const gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     defer std.debug.assert(gpa.deinit() == .ok);
 
@@ -102,11 +102,12 @@ fn handleBuild(file_path: []const u8) !void {
 // ----------------------
 
 test "CLI usage message prints" {
-    var fbs = std.io.fixedBufferStream([]u8{0} ** 1024);
+    var buffer: [1024]u8 = [_]u8{0} ** 1024;
+    var fbs = std.io.fixedBufferStream(buffer[0..]);
     const writer = fbs.writer();
 
     try writer.print("{s}", .{USAGE_TEXT});
 
-    const buffer = fbs.getWritten();
-    try std.testing.expect(std.mem.indexOf(u8, buffer, "docz build") != null);
+    const written = fbs.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, written, "docz build") != null);
 }
