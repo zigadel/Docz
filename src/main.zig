@@ -12,7 +12,7 @@ pub const USAGE_TEXT =
     \\
 ;
 
-/// Entry point for CLI
+/// CLI entry point
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
@@ -36,21 +36,21 @@ pub fn main() !void {
         try handleBuild(args[2]);
     } else if (std.mem.eql(u8, cmd, "preview")) {
         std.debug.print("Starting preview server...\n", .{});
-        // TODO: implement HTTP server
+        // TODO: HTTP server
     } else if (std.mem.eql(u8, cmd, "enable") and args.len >= 3 and std.mem.eql(u8, args[2], "wasm")) {
         std.debug.print("Enabling WASM execution support...\n", .{});
-        // TODO: implement WASM enable logic
+        // TODO: WASM logic
     } else {
         printUsage();
     }
 }
 
-/// Prints CLI usage message
+/// Prints usage help text
 fn printUsage() void {
     std.debug.print("{s}", .{USAGE_TEXT});
 }
 
-/// Handles the `build` command
+/// Handles the `docz build file.dcz` command
 fn handleBuild(file_path: []const u8) !void {
     // Open input file
     var file = try std.fs.cwd().openFile(file_path, .{});
@@ -62,16 +62,15 @@ fn handleBuild(file_path: []const u8) !void {
 
     _ = try file.readAll(buffer);
 
-    // GPA for tokenizing & parsing
+    // Tokenize
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
     defer std.debug.assert(gpa.deinit() == .ok);
 
-    // Tokenize
     const tokens = try tokenizer.tokenize(buffer, allocator);
     defer allocator.free(tokens);
 
-    // Parse AST
+    // Parse
     var ast = try parser.parse(tokens, allocator);
     defer {
         for (ast.children.items) |*child| {
@@ -81,11 +80,11 @@ fn handleBuild(file_path: []const u8) !void {
         ast.children.deinit();
     }
 
-    // Render HTML
+    // Render
     const html = try renderer.renderHTML(&ast, allocator);
     defer allocator.free(html);
 
-    // Write output
+    // Output
     const out_file_name = try std.fmt.allocPrint(allocator, "{s}.html", .{file_path});
     defer allocator.free(out_file_name);
 
@@ -97,13 +96,10 @@ fn handleBuild(file_path: []const u8) !void {
     std.debug.print("✔ Built {s} → {s}\n", .{ file_path, out_file_name });
 }
 
-// ----------------------
-// Tests
-// ----------------------
-
+// Simple test for CLI usage message
 test "CLI usage message prints" {
-    var buffer: [1024]u8 = [_]u8{0} ** 1024;
-    var fbs = std.io.fixedBufferStream(buffer[0..]);
+    var buffer: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buffer);
     const writer = fbs.writer();
 
     try writer.print("{s}", .{USAGE_TEXT});

@@ -5,45 +5,54 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // ─────────────────────────────────────────────
-    // Executable: Docz CLI
+    // 📦 Shared docz module (root.zig)
     // ─────────────────────────────────────────────
-    const cli_module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const exe = b.addExecutable(.{
-        .name = "docz",
-        .root_module = cli_module,
-    });
-
-    b.installArtifact(exe);
-
-    // ─────────────────────────────────────────────
-    // Unit Tests via root.zig
-    // ─────────────────────────────────────────────
-    const unit_module = b.createModule(.{
+    const docz_module = b.createModule(.{
         .root_source_file = b.path("root.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const unit_tests = b.addTest(.{
-        .root_module = unit_module,
+    // ─────────────────────────────────────────────
+    // 🖥 CLI Executable: docz
+    // ─────────────────────────────────────────────
+    const cli_root_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
     });
+    cli_root_module.addImport("docz", docz_module);
 
-    const test_step = b.step("test", "Run all inline unit tests");
-    test_step.dependOn(&unit_tests.step);
+    const exe = b.addExecutable(.{
+        .name = "docz",
+        .root_module = cli_root_module,
+    });
+    b.installArtifact(exe);
+
+    const run_cmd = b.addRunArtifact(exe);
+    const run_step = b.step("run", "Run the Docz CLI");
+    run_step.dependOn(&run_cmd.step);
+    if (b.args) |args| run_cmd.addArgs(args);
 
     // ─────────────────────────────────────────────
-    // Integration Tests via tests/test_all_integration.zig
+    // 🧪 Unit Tests (root.zig)
+    // ─────────────────────────────────────────────
+    const unit_tests = b.addTest(.{
+        .root_module = docz_module,
+    });
+
+    const unit_step = b.step("test", "Run unit tests");
+    unit_step.dependOn(&unit_tests.step);
+
+    // ─────────────────────────────────────────────
+    // 🧪 Integration Tests
     // ─────────────────────────────────────────────
     const integration_module = b.createModule(.{
         .root_source_file = b.path("tests/test_all_integration.zig"),
         .target = target,
         .optimize = optimize,
     });
+    integration_module.addImport("docz", docz_module);
 
     const integration_tests = b.addTest(.{
         .root_module = integration_module,
@@ -53,13 +62,14 @@ pub fn build(b: *std.Build) void {
     integration_step.dependOn(&integration_tests.step);
 
     // ─────────────────────────────────────────────
-    // End-to-End Tests via tests/test_all_e2e.zig
+    // 🧪 End-to-End Tests
     // ─────────────────────────────────────────────
     const e2e_module = b.createModule(.{
         .root_source_file = b.path("tests/test_all_e2e.zig"),
         .target = target,
         .optimize = optimize,
     });
+    e2e_module.addImport("docz", docz_module);
 
     const e2e_tests = b.addTest(.{
         .root_module = e2e_module,
@@ -69,16 +79,10 @@ pub fn build(b: *std.Build) void {
     e2e_step.dependOn(&e2e_tests.step);
 
     // ─────────────────────────────────────────────
-    // Run all tests together
+    // 🔁 test-all: aggregate test step
     // ─────────────────────────────────────────────
-    const all_tests = b.step("test-all", "Run unit + integration + e2e tests");
+    const all_tests = b.step("test-all", "Run all tests");
     all_tests.dependOn(&unit_tests.step);
     all_tests.dependOn(&integration_tests.step);
     all_tests.dependOn(&e2e_tests.step);
-
-    // ─────────────────────────────────────────────
-    // Run the CLI
-    // ─────────────────────────────────────────────
-    const run_step = b.step("run", "Run the Docz CLI");
-    run_step.dependOn(&b.addRunArtifact(exe).step);
 }
