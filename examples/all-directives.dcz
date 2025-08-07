@@ -1,0 +1,66 @@
+@meta(title="All Directives Example", version="1.0", author="Docz") @end
+
+@heading(level=1) Docz All Directives Demo @end
+
+@heading(level=2) Metadata & Heading @end
+This section shows meta + heading usage.
+
+@heading(level=2) Style System @end
+@style-def()
+heading-level-1: font-size=36px, font-weight=bold, color=#000
+body-text: font-family="Inter", line-height=1.6
+@end
+
+@style(color=blue, font-size=18px)
+This text is styled inline.
+@end
+
+@heading(level=2) Data Directive @end
+@data(format="json")
+{
+    "name": "Docz",
+    "version": "1.0"
+}
+@end
+
+@heading(level=2) Code Block @end
+@code(language="zig", execute=true)
+const x: i32 = 42;
+@print(x);
+@end
+
+@heading(level=2) Math & Plot @end
+@math()
+E = mc^2
+@end
+
+@plot(type="line")
+x: [1, 2, 3, 4]
+y: [1, 4, 9, 16]
+@end
+
+@heading(level=2) Media @end
+@image(src="img/logo.png", width="200px") @end
+@video(src="demo.mp4", controls=true) @end
+@audio(src="sound.mp3", controls=true) @end
+@pdf(src="paper.pdf") @end
+
+@heading(level=2) Embed & Logic @end
+@embed(type="zeno-scene", source="scenes/fluid.zscene", width="800px") @end
+
+@logic()
+function hello() {
+    alert("Hello from Docz!");
+}
+@end
+
+@heading(level=2) Graph & Query @end
+@graph(type="imports")
+nodes: [main.dcz, intro.dcz]
+edges: [main.dcz -> intro.dcz]
+@end
+
+ZUQL Example:
+@code(language="sql")
+SELECT docs WHERE tag="math";
+@end

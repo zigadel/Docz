@@ -4,40 +4,60 @@ pub const NodeType = enum {
     Document,
     Meta,
     Heading,
+    Content,
     CodeBlock,
-    Style,
-    Import,
     Math,
     Media,
-    Content,
+    Import,
+    Style,
 };
 
 pub const ASTNode = struct {
     node_type: NodeType,
+    content: []const u8 = "",
     attributes: std.StringHashMap([]const u8),
-    content: []const u8,
     children: std.ArrayList(ASTNode),
 
     pub fn init(allocator: std.mem.Allocator, node_type: NodeType) ASTNode {
         return ASTNode{
             .node_type = node_type,
-            .attributes = std.StringHashMap([]const u8).init(allocator),
             .content = "",
+            .attributes = std.StringHashMap([]const u8).init(allocator),
             .children = std.ArrayList(ASTNode).init(allocator),
         };
     }
 
-    /// Recursively free all child nodes, attributes, and the array list itself
     pub fn deinit(self: *ASTNode) void {
-        // Free attributes
-        self.attributes.deinit();
-
-        // Recursively free children
-        for (self.children.items) |*child| {
-            child.deinit();
+        var i: usize = 0;
+        while (i < self.children.items.len) : (i += 1) {
+            self.children.items[i].deinit();
         }
-
-        // Free children array
         self.children.deinit();
+        self.attributes.deinit();
+    }
+
+    pub fn addChild(self: *ASTNode, child: ASTNode) !void {
+        try self.children.append(child);
     }
 };
+
+// -------------
+// Unit Tests
+// -------------
+test "ASTNode init and deinit with attributes and children" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    var root = ASTNode.init(allocator, .Document);
+    defer root.deinit();
+
+    var heading = ASTNode.init(allocator, .Heading);
+    heading.content = "Docz Title";
+    try heading.attributes.put("level", "2");
+    try root.addChild(heading);
+
+    try std.testing.expect(root.children.items.len == 1);
+    try std.testing.expect(std.mem.eql(u8, root.children.items[0].content, "Docz Title"));
+    try std.testing.expect(root.children.items[0].attributes.contains("level"));
+}

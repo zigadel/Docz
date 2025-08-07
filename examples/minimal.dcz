@@ -1,0 +1,3 @@
+@meta(title="Minimal Doc", author="Docz Team") @end
+@heading(level=1) Hello Docz @end
+Welcome to the minimal example.
