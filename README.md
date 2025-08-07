@@ -54,12 +54,12 @@ curl -fsSL https://get.quartz.dev/install.sh | sh
 
 ### Create Your First Docz File
 ```bash
-qz new README.dcz
+dcz new README.dcz
 ```
 
 ### Preview in Quartz
 ```bash
-qz preview README.dcz
+dcz preview README.dcz
 ```
 
 ---
@@ -419,11 +419,11 @@ SELECT docs WHERE tag="math" AND status="draft";
 ### Install Plugins
 
 ```bash
-qz install plugin-zeno
-qz install plugin-3d-model
-qz install plugin-vulkan
-qz install plugin-webgpu
-qz install plugin-python
+dcz install plugin-zeno
+dcz install plugin-3d-model
+dcz install plugin-vulkan
+dcz install plugin-webgpu
+dcz install plugin-python
 ```
 
 ### Add Custom Directives
@@ -482,21 +482,21 @@ Docz runtime architecture:
 
 ## 15. CLI Reference
 
-Quartz CLI: `qz`
+Quartz CLI: `dcz`
 
 | Command      | Description               |
 | ------------ | ------------------------- |
-| `qz new`     | Create a new Docz file    |
-| `qz preview` | Live preview in Quartz UI |
-| `qz build`   | Compile to HTML/PDF       |
-| `qz install` | Install plugins           |
+| `dcz new`     | Create a new Docz file    |
+| `dcz preview` | Live preview in Quartz UI |
+| `dcz build`   | Compile to HTML/PDF       |
+| `dcz install` | Install plugins           |
 
 ### Examples
 
 ```bash
-qz new README.dcz
-qz preview README.dcz
-qz build main.dcz --output docs/
+dcz new README.dcz
+dcz preview README.dcz
+dcz build main.dcz --output docs/
 ```
 
 ---
@@ -574,4 +574,4 @@ function play(id) {
 - `.github/` folder includes:
     - Issue & PR templates.
     - CI workflows (build, test, release).
-- Run tests: `zig build test`
+- Run tests: `zig build test` (for unit tests), `test-integration`, `test-e2e`, or `test-all`
