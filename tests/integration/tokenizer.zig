@@ -1,12 +1,6 @@
 const std = @import("std");
 const docz = @import("docz");
 
-pub const _ = true;
-
-test "🔍 VISIBLE TEST: tokenizer integration test" {
-    try std.testing.expect(false); // Force fail so you can see it ran
-}
-
 test "integration: tokenizer produces correct tokens from .dcz input" {
     const input =
         \\@heading(level=1) Hello, Docz! @end
@@ -26,20 +20,4 @@ test "integration: tokenizer produces correct tokens from .dcz input" {
     }
 
     try std.testing.expect(tokens.len > 2);
-}
-
-test "tokenizer: placeholder" {
-    const allocator = std.testing.allocator;
-    const input = "Hello, *world!*";
-    const tokens = try docz.Tokenizer.tokenize(input, allocator);
-    defer docz.Tokenizer.freeTokens(allocator, tokens);
-
-    try std.testing.expect(tokens.len > 0);
-
-    // TEMP: Force fail to verify this runs
-    try std.testing.expect(tokens.len == 999); // should fail
-}
-
-test "force fail" {
-    try std.testing.expect(false); // just for test
 }
