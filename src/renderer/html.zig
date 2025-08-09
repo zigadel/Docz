@@ -133,6 +133,9 @@ pub fn renderHTML(root: *const ASTNode, allocator: std.mem.Allocator) ![]u8 {
     // Body rendering
     for (root.children.items) |node| {
         switch (node.node_type) {
+            .Meta => {
+                // Meta already emitted into <head>; skip in body to avoid noise.
+            },
             .Heading => {
                 const level = node.attributes.get("level") orelse "1";
                 const text = std.mem.trimRight(u8, node.content, " \t\r\n");

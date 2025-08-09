@@ -150,10 +150,10 @@ test "Tokenize escape sequence @@ as literal @" {
         allocator.free(tokens);
     }
 
-    std.debug.print("DEBUG TOKENS (len={}):\n", .{tokens.len});
-    for (tokens, 0..) |t, idx| {
-        std.debug.print("  {}: kind={any}, lexeme=\"{s}\"\n", .{ idx, t.kind, t.lexeme });
-    }
+    // std.debug.print("DEBUG TOKENS (len={}):\n", .{tokens.len});
+    // for (tokens, 0..) |t, idx| {
+    //     std.debug.print("  {}: kind={any}, lexeme=\"{s}\"\n", .{ idx, t.kind, t.lexeme });
+    // }
 
     try std.testing.expectEqual(@as(usize, 2), tokens.len);
     try std.testing.expectEqualStrings(tokens[0].lexeme, "Contact ");

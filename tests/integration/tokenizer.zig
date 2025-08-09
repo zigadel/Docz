@@ -18,10 +18,10 @@ test "integration: tokenizer produces correct tokens from .dcz input" {
         allocator.free(tokens);
     }
 
-    std.debug.print("📦 Tokenizer produced {d} tokens:\n", .{tokens.len});
-    for (tokens, 0..) |tok, i| {
-        std.debug.print("  [{d}] {s} : {s}\n", .{ i, @tagName(tok.kind), tok.lexeme });
-    }
+    // std.debug.print("📦 Tokenizer produced {d} tokens:\n", .{tokens.len});
+    // for (tokens, 0..) |tok, i| {
+    //     std.debug.print("  [{d}] {s} : {s}\n", .{ i, @tagName(tok.kind), tok.lexeme });
+    // }
 
     try std.testing.expect(tokens.len > 2);
 }

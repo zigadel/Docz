@@ -29,7 +29,7 @@ test "📄 Parse and render a basic .dcz file to HTML" {
     const html = try renderer.renderHTML(&ast, allocator);
     defer allocator.free(html);
 
-    std.debug.print("\n🖨️ Rendered HTML Output:\n{s}\n", .{html});
+    // std.debug.print("\n🖨️ Rendered HTML Output:\n{s}\n", .{html});
 
     try std.testing.expect(std.mem.containsAtLeast(u8, html, 1, "<h1>Welcome to Docz</h1>"));
     try std.testing.expect(std.mem.containsAtLeast(u8, html, 1, "const x = 42;"));

@@ -30,7 +30,7 @@ test "integration: renderer produces HTML from simple AST" {
     const html = try docz.Renderer.renderHTML(&ast, allocator);
     defer allocator.free(html);
 
-    std.debug.print("🖨️  Rendered HTML:\n{s}\n", .{html});
+    // std.debug.print("🖨️  Rendered HTML:\n{s}\n", .{html});
 
     // Assertions
     try std.testing.expect(std.mem.containsAtLeast(u8, html, 1, "<h3>Render Test</h3>"));
