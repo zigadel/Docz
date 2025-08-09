@@ -18,7 +18,10 @@ test "📄 Parse and render a basic .dcz file to HTML" {
     defer std.debug.assert(gpa.deinit() == .ok);
 
     const tokens = try tokenizer.tokenize(input, allocator);
-    defer tokenizer.freeTokens(allocator, tokens);
+    defer {
+        docz.Tokenizer.freeTokens(allocator, tokens);
+        allocator.free(tokens);
+    }
 
     var ast = try parser.parse(tokens, allocator);
     defer ast.deinit();

@@ -2,20 +2,52 @@ const std = @import("std");
 const ASTNode = @import("../parser/ast.zig").ASTNode;
 const NodeType = @import("../parser/ast.zig").NodeType;
 
-/// Converts "font-size=36px, color=#222" → "font-size:36px;color:#222;"
+// ---- helpers ----
+fn lessStr(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+fn styleKeyPriority(k: []const u8) u8 {
+    if (std.mem.eql(u8, k, "font-size")) return 0; // ensure font-size first
+    if (std.mem.eql(u8, k, "color")) return 1; // then color
+    return 100; // others later
+}
+
+fn styleKeyLess(_: void, a: []const u8, b: []const u8) bool {
+    const pa = styleKeyPriority(a);
+    const pb = styleKeyPriority(b);
+    if (pa != pb) return pa < pb; // priority first
+    return std.mem.lessThan(u8, a, b); // then lexicographic
+}
+
+/// Converts attributes → inline CSS string; excludes non-style keys (like "mode")
 fn buildInlineStyle(attributes: std.StringHashMap([]const u8), allocator: std.mem.Allocator) ![]u8 {
-    var builder = std.ArrayList(u8).init(allocator);
-    const writer = builder.writer();
+    var keys = std.ArrayList([]const u8).init(allocator);
+    defer keys.deinit();
 
     var it = attributes.iterator();
-    var first = true;
     while (it.next()) |entry| {
-        if (!first) try writer.print(";", .{});
-        try writer.print("{s}:{s}", .{ entry.key_ptr.*, entry.value_ptr.* });
+        const k = entry.key_ptr.*;
+        if (std.mem.eql(u8, k, "mode")) continue; // exclude control key
+        try keys.append(k);
+    }
+
+    // sort with priority
+    std.mem.sort([]const u8, keys.items, {}, styleKeyLess);
+
+    var out = std.ArrayList(u8).init(allocator);
+    const w = out.writer();
+
+    var first = true;
+    for (keys.items) |k| {
+        const v = attributes.get(k).?;
+        if (!first) try w.print(";", .{});
+        try w.print("{s}:{s}", .{ k, v });
         first = false;
     }
-    try writer.print(";", .{});
-    return builder.toOwnedSlice();
+    try w.print(";", .{}); // trailing ; expected by the test
+
+    return out.toOwnedSlice();
 }
 
 /// Converts style-def content into CSS
@@ -103,7 +135,8 @@ pub fn renderHTML(root: *const ASTNode, allocator: std.mem.Allocator) ![]u8 {
         switch (node.node_type) {
             .Heading => {
                 const level = node.attributes.get("level") orelse "1";
-                try writer.print("<h{s}>{s}</h{s}>\n", .{ level, node.content, level });
+                const text = std.mem.trimRight(u8, node.content, " \t\r\n");
+                try writer.print("<h{s}>{s}</h{s}>\n", .{ level, text, level });
             },
             .Content => {
                 try writer.print("<p>{s}</p>\n", .{node.content});

@@ -9,6 +9,13 @@ fn directiveToNodeType(directive: []const u8) NodeType {
     return if (std.mem.eql(u8, directive, "@meta")) NodeType.Meta else if (std.mem.eql(u8, directive, "@heading")) NodeType.Heading else if (std.mem.eql(u8, directive, "@code")) NodeType.CodeBlock else if (std.mem.eql(u8, directive, "@math")) NodeType.Math else if (std.mem.eql(u8, directive, "@image")) NodeType.Media else if (std.mem.eql(u8, directive, "@import")) NodeType.Import else if (std.mem.eql(u8, directive, "@style")) NodeType.Style else NodeType.Content;
 }
 
+fn isBlockDirective(nt: NodeType) bool {
+    return switch (nt) {
+        .CodeBlock, .Math, .Style => true,
+        else => false,
+    };
+}
+
 /// Parses tokens into an ASTNode tree
 pub fn parse(tokens: []const Token, allocator: std.mem.Allocator) !ASTNode {
     var root = ASTNode.init(allocator, .Document);
@@ -20,43 +27,53 @@ pub fn parse(tokens: []const Token, allocator: std.mem.Allocator) !ASTNode {
         if (tok.kind == .Directive) {
             const node_type = directiveToNodeType(tok.lexeme);
             var node = ASTNode.init(allocator, node_type);
-
             i += 1;
 
-            // Parse attribute key-value pairs (e.g. title="Docz")
+            // parameters
             while (i + 1 < tokens.len and tokens[i].kind == .ParameterKey and tokens[i + 1].kind == .ParameterValue) {
                 try node.attributes.put(tokens[i].lexeme, tokens[i + 1].lexeme);
                 i += 2;
             }
 
-            // Capture inline content
+            // inline content (e.g. heading title)
             if (i < tokens.len and tokens[i].kind == .Content) {
-                node.content = tokens[i].lexeme;
+                node.content = tokens[i].lexeme; // not owned
+                node.owns_content = false;
                 i += 1;
             }
 
-            // Capture multiline block content until @end
-            if (i < tokens.len and tokens[i].kind != .Directive and node_type != .Meta and node_type != .Import) {
-                var block_content = std.ArrayList(u8).init(allocator);
-                while (i < tokens.len and !std.mem.eql(u8, tokens[i].lexeme, "@end")) : (i += 1) {
-                    try block_content.appendSlice(tokens[i].lexeme);
-                    try block_content.append('\n');
+            // block content only for block directives
+            if (isBlockDirective(node_type)) {
+                var block = std.ArrayList(u8).init(allocator);
+                defer block.deinit();
+
+                while (i < tokens.len and tokens[i].kind != .BlockEnd) : (i += 1) {
+                    try block.appendSlice(tokens[i].lexeme);
+                    try block.append('\n');
                 }
-                if (i < tokens.len and std.mem.eql(u8, tokens[i].lexeme, "@end")) {
-                    i += 1;
+                if (i < tokens.len and tokens[i].kind == .BlockEnd) {
+                    i += 1; // skip @end
                 }
-                node.content = try block_content.toOwnedSlice();
+
+                if (block.items.len > 0) {
+                    node.content = try block.toOwnedSlice();
+                    node.owns_content = true; // we allocated it
+                }
             }
 
             try root.children.append(node);
-        } else if (tok.kind == .Content) {
+            continue;
+        }
+
+        if (tok.kind == .Content) {
             var content_node = ASTNode.init(allocator, .Content);
-            content_node.content = tok.lexeme;
+            content_node.content = tok.lexeme; // not owned
             try root.children.append(content_node);
             i += 1;
-        } else {
-            i += 1;
+            continue;
         }
+
+        i += 1;
     }
 
     return root;

@@ -8,11 +8,15 @@ test "integration: tokenizer produces correct tokens from .dcz input" {
     ;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
+    defer std.debug.assert(gpa.deinit() == .ok);
 
     const tokens = try docz.Tokenizer.tokenize(input, allocator);
-    defer docz.Tokenizer.freeTokens(allocator, tokens);
+    defer {
+        // IMPORTANT: free allocated lexemes first, then the slice itself
+        docz.Tokenizer.freeTokens(allocator, tokens);
+        allocator.free(tokens);
+    }
 
     std.debug.print("📦 Tokenizer produced {d} tokens:\n", .{tokens.len});
     for (tokens, 0..) |tok, i| {

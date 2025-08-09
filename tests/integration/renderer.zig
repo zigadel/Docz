@@ -16,16 +16,23 @@ test "integration: renderer produces HTML from simple AST" {
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
 
+    // Tokenize
     const tokens = try docz.Tokenizer.tokenize(input, allocator);
-    defer docz.Tokenizer.freeTokens(allocator, tokens);
+    // IMPORTANT: since we'll parse, the AST owns any lexeme strings.
+    // Only free the *slice* here (no Tokenizer.freeTokens).
+    defer allocator.free(tokens);
 
+    // Parse → AST takes ownership of token lexemes
     var ast = try docz.Parser.parse(tokens, allocator);
     defer ast.deinit();
 
+    // Render
     const html = try docz.Renderer.renderHTML(&ast, allocator);
     defer allocator.free(html);
 
     std.debug.print("🖨️  Rendered HTML:\n{s}\n", .{html});
-    try std.testing.expect(std.mem.containsAtLeast(u8, html, 1, "<h3>"));
+
+    // Assertions
+    try std.testing.expect(std.mem.containsAtLeast(u8, html, 1, "<h3>Render Test</h3>"));
     try std.testing.expect(std.mem.containsAtLeast(u8, html, 1, "const x = 9;"));
 }

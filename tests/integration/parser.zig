@@ -12,7 +12,10 @@ test "integration: parser builds AST from token list" {
     const allocator = gpa.allocator();
 
     const tokens = try docz.Tokenizer.tokenize(input, allocator);
-    defer docz.Tokenizer.freeTokens(allocator, tokens);
+    defer {
+        docz.Tokenizer.freeTokens(allocator, tokens);
+        allocator.free(tokens);
+    }
 
     var ast = try docz.Parser.parse(tokens, allocator);
     defer ast.deinit();

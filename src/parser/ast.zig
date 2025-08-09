@@ -15,6 +15,8 @@ pub const NodeType = enum {
 pub const ASTNode = struct {
     node_type: NodeType,
     content: []const u8 = "",
+    owns_content: bool = false,
+    allocator: ?std.mem.Allocator = null,
     attributes: std.StringHashMap([]const u8),
     children: std.ArrayList(ASTNode),
 
@@ -22,18 +24,26 @@ pub const ASTNode = struct {
         return ASTNode{
             .node_type = node_type,
             .content = "",
+            .owns_content = false,
+            .allocator = allocator,
             .attributes = std.StringHashMap([]const u8).init(allocator),
             .children = std.ArrayList(ASTNode).init(allocator),
         };
     }
 
     pub fn deinit(self: *ASTNode) void {
+        // children first
         var i: usize = 0;
         while (i < self.children.items.len) : (i += 1) {
             self.children.items[i].deinit();
         }
         self.children.deinit();
         self.attributes.deinit();
+
+        // free content if we own it
+        if (self.owns_content and self.content.len > 0) {
+            if (self.allocator) |a| a.free(self.content);
+        }
     }
 
     pub fn addChild(self: *ASTNode, child: ASTNode) !void {
