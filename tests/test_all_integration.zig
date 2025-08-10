@@ -6,6 +6,7 @@ comptime {
     _ = @import("integration/renderer.zig");
     _ = @import("integration/pipeline.zig");
     _ = @import("integration/convert_html_import.zig");
+    _ = @import("integration/latex_roundtrip.zig");
 }
 
 test {

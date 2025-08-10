@@ -1,181 +1,175 @@
 const std = @import("std");
-const docz = @import("docz"); // <— instead of ../../parser/ast.zig
+const docz = @import("docz");
 const ASTNode = docz.AST.ASTNode;
 const NodeType = docz.AST.NodeType;
 
-// ---------- helpers (decl-level; no nesting) ----------
-fn styleKeyPriority(k: []const u8) u8 {
-    if (std.mem.eql(u8, k, "font-size")) return 0;
-    if (std.mem.eql(u8, k, "color")) return 1;
-    return 100;
+// -------------------------
+// Helpers
+// -------------------------
+
+fn trimRightNl(s: []const u8) []const u8 {
+    return std.mem.trimRight(u8, s, " \t\r\n");
 }
 
-fn styleKeyLess(_: void, a: []const u8, b: []const u8) bool {
-    const pa = styleKeyPriority(a);
-    const pb = styleKeyPriority(b);
-    if (pa != pb) return pa < pb;
-    return std.mem.lessThan(u8, a, b);
+fn clampHeadingLevel(lvl_raw: u8) u8 {
+    return if (lvl_raw < 1) 1 else if (lvl_raw > 6) 6 else lvl_raw;
 }
 
-/// Converts attributes → inline CSS string; excludes non-style keys (like "mode")
-fn buildInlineStyle(attributes: std.StringHashMap([]const u8), allocator: std.mem.Allocator) ![]u8 {
-    var keys = std.ArrayList([]const u8).init(allocator);
-    defer keys.deinit();
+/// Escape LaTeX special characters in normal text (headings/paragraphs).
+/// Code/Math/Media are NOT escaped.
+fn latexEscape(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out = std.ArrayList(u8).init(alloc);
+    errdefer out.deinit();
 
-    var it = attributes.iterator();
-    while (it.next()) |entry| {
-        const k = entry.key_ptr.*;
-        if (std.mem.eql(u8, k, "mode")) continue;
-        try keys.append(k);
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        switch (c) {
+            '\\' => try out.appendSlice("\\textbackslash{}"),
+            '{' => try out.appendSlice("\\{"),
+            '}' => try out.appendSlice("\\}"),
+            '%' => try out.appendSlice("\\%"),
+            '&' => try out.appendSlice("\\&"),
+            '$' => try out.appendSlice("\\$"),
+            '#' => try out.appendSlice("\\#"),
+            '_' => try out.appendSlice("\\_"),
+            '^' => try out.appendSlice("\\textasciicircum{}"),
+            '~' => try out.appendSlice("\\textasciitilde{}"),
+            else => try out.append(c),
+        }
     }
-
-    std.mem.sort([]const u8, keys.items, {}, styleKeyLess);
-
-    var out = std.ArrayList(u8).init(allocator);
-    const w = out.writer();
-
-    var first = true;
-    for (keys.items) |k| {
-        const v = attributes.get(k).?;
-        if (!first) try w.print(";", .{});
-        try w.print("{s}:{s}", .{ k, v });
-        first = false;
-    }
-    try w.print(";", .{});
     return out.toOwnedSlice();
 }
 
-/// Converts style-def content into CSS rules (simple "class: k=v, k2=v2" lines)
-fn buildGlobalCSS(style_content: []const u8, allocator: std.mem.Allocator) ![]u8 {
-    var builder = std.ArrayList(u8).init(allocator);
-    const writer = builder.writer();
-
-    var lines = std.mem.tokenizeScalar(u8, style_content, '\n');
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (trimmed.len == 0) continue;
-
-        const colon_index = std.mem.indexOfScalar(u8, trimmed, ':') orelse continue;
-        const class_name = std.mem.trim(u8, trimmed[0..colon_index], " \t");
-        const props_raw = std.mem.trim(u8, trimmed[colon_index + 1 ..], " \t");
-
-        try writer.print(".{s} {{ ", .{class_name});
-
-        var props_iter = std.mem.tokenizeScalar(u8, props_raw, ',');
-        var first = true;
-        while (props_iter.next()) |prop| {
-            const clean = std.mem.trim(u8, prop, " \t");
-            const eq_i = std.mem.indexOfScalar(u8, clean, '=') orelse continue;
-            const key = std.mem.trim(u8, clean[0..eq_i], " \t");
-            const value = std.mem.trim(u8, clean[eq_i + 1 ..], " \t\"");
-            if (!first) try writer.print(" ", .{});
-            try writer.print("{s}:{s};", .{ key, value });
-            first = false;
-        }
-
-        try writer.print(" }}\n", .{});
-    }
-
-    return builder.toOwnedSlice();
+fn writeParagraph(w: anytype, text: []const u8, alloc: std.mem.Allocator) !void {
+    const t = trimRightNl(text);
+    if (t.len == 0) return;
+    const esc = try latexEscape(alloc, t);
+    defer alloc.free(esc);
+    try std.fmt.format(w, "{s}\n\n", .{esc});
 }
 
-// ---------- public API ----------
-pub fn exportToHtml(root: *const ASTNode, allocator: std.mem.Allocator) ![]u8 {
+fn writeHeading(w: anytype, level_str: []const u8, text: []const u8, alloc: std.mem.Allocator) !void {
+    const lvl_u = std.fmt.parseUnsigned(u8, level_str, 10) catch 1;
+    const lvl = clampHeadingLevel(lvl_u);
+
+    const cmd: []const u8 = switch (lvl) {
+        1 => "\\section",
+        2 => "\\subsection",
+        else => "\\subsubsection",
+    };
+
+    const t = trimRightNl(text);
+    const esc = try latexEscape(alloc, t);
+    defer alloc.free(esc);
+    // {cmd}{text}  →  \section{My Title}
+    try std.fmt.format(w, "{s}{{{s}}}\n\n", .{ cmd, esc });
+}
+
+fn writeCodeBlock(w: anytype, body: []const u8) !void {
+    // Code: raw
+    try std.fmt.format(w, "\\begin{{verbatim}}\n{s}\n\\end{{verbatim}}\n\n", .{body});
+}
+
+fn writeMath(w: anytype, body: []const u8) !void {
+    // Math: raw body, importer already normalizes whitespace on the way back
+    const b = trimRightNl(body);
+    if (b.len == 0) return;
+    try std.fmt.format(w, "\\begin{{equation}}\n{s}\n\\end{{equation}}\n\n", .{b});
+}
+
+fn writeImage(w: anytype, src: []const u8) !void {
+    // Media: keep src raw (filenames often contain underscores; escaping would break)
+    if (src.len == 0) return;
+    try std.fmt.format(w, "\\includegraphics{{{s}}}\n\n", .{src});
+}
+
+// -------------------------
+// Public API
+// -------------------------
+
+/// Export AST -> minimal LaTeX.
+/// Notes:
+/// - Only emits \title and \author if present in Meta nodes.
+/// - Headings > 3 are clamped to \subsubsection.
+/// - Content/Heading text are LaTeX-escaped; Code/Math/Media are not.
+/// - Unknown nodes are ignored.
+pub fn exportAstToLatex(doc: *const ASTNode, allocator: std.mem.Allocator) ![]u8 {
     var out = std.ArrayList(u8).init(allocator);
     errdefer out.deinit();
     const w = out.writer();
 
-    try w.writeAll("<!DOCTYPE html>\n<html>\n<head>\n");
+    var title_emitted = false;
+    var author_emitted = false;
 
-    // Head: <title>, <meta>, <style> (global)
-    // Title/meta collected from Meta nodes; CSS aggregated from Style(mode="global")
-    // First pass: meta + title
-    for (root.children.items) |node| {
-        if (node.node_type == .Meta) {
-            var it = node.attributes.iterator();
-            while (it.next()) |entry| {
-                const k = entry.key_ptr.*;
-                const v = entry.value_ptr.*;
-                if (std.mem.eql(u8, k, "title")) {
-                    try w.print("<title>{s}</title>\n", .{v});
-                } else {
-                    try w.print("<meta name=\"{s}\" content=\"{s}\">\n", .{ k, v });
-                }
+    // Pass 1: gather title/author from Meta nodes
+    for (doc.children.items) |node| {
+        if (node.node_type != .Meta) continue;
+
+        if (!title_emitted) {
+            if (node.attributes.get("title")) |t| {
+                const esc = try latexEscape(allocator, t);
+                defer allocator.free(esc);
+                try std.fmt.format(w, "\\title{{{s}}}\n", .{esc});
+                title_emitted = true;
+            }
+        }
+        if (!author_emitted) {
+            if (node.attributes.get("author")) |a| {
+                const esc = try latexEscape(allocator, a);
+                defer allocator.free(esc);
+                try std.fmt.format(w, "\\author{{{s}}}\n", .{esc});
+                author_emitted = true;
             }
         }
     }
-
-    // Second pass: global CSS
-    var global_css_buf = std.ArrayList(u8).init(allocator);
-    const g = global_css_buf.writer();
-    for (root.children.items) |node| {
-        if (node.node_type == .Style) {
-            if (node.attributes.get("mode")) |mode| {
-                if (std.mem.eql(u8, mode, "global")) {
-                    const css = try buildGlobalCSS(node.content, allocator);
-                    defer allocator.free(css);
-                    try g.print("{s}\n", .{css});
-                }
-            }
-        }
+    if (title_emitted or author_emitted) {
+        try w.writeAll("\n");
     }
-    if (global_css_buf.items.len != 0) {
-        try w.print("<style>\n{s}</style>\n", .{global_css_buf.items});
-    }
-    global_css_buf.deinit();
 
-    try w.writeAll("</head>\n<body>\n");
-
-    // Body: render supported nodes
-    for (root.children.items) |node| {
+    // Pass 2: body
+    for (doc.children.items) |node| {
         switch (node.node_type) {
-            .Meta => {}, // already handled in <head>
+            .Meta => {}, // handled above
             .Heading => {
-                const level = node.attributes.get("level") orelse "1";
-                const text = std.mem.trimRight(u8, node.content, " \t\r\n");
-                try w.print("<h{s}>{s}</h{s}>\n", .{ level, text, level });
+                const level_str = node.attributes.get("level") orelse "1";
+                try writeHeading(w, level_str, node.content, allocator);
             },
             .Content => {
-                try w.print("<p>{s}</p>\n", .{node.content});
+                try writeParagraph(w, node.content, allocator);
             },
             .CodeBlock => {
-                try w.print("<pre><code>{s}</code></pre>\n", .{node.content});
+                try writeCodeBlock(w, node.content);
             },
             .Math => {
-                try w.print("<div class=\"math\">{s}</div>\n", .{node.content});
+                try writeMath(w, node.content);
             },
             .Media => {
                 const src = node.attributes.get("src") orelse "";
-                try w.print("<img src=\"{s}\" />\n", .{src});
+                if (src.len != 0) try writeImage(w, src);
             },
-            .Import => {
-                // Treat as CSS link for HTML export
-                const href = node.attributes.get("href") orelse "";
-                try w.print("<link rel=\"stylesheet\" href=\"{s}\">\n", .{href});
-            },
-            .Style => {
-                if (node.attributes.get("mode")) |mode| {
-                    if (std.mem.eql(u8, mode, "inline")) {
-                        const inline_css = try buildInlineStyle(node.attributes, allocator);
-                        defer allocator.free(inline_css);
-                        try w.print("<span style=\"{s}\">{s}</span>\n", .{ inline_css, node.content });
-                    } else {
-                        // global already handled
-                    }
-                }
+            .Import, .Style => {
+                // ignore in LaTeX export (minimal)
             },
             else => {
-                try w.print("<!-- Unhandled node: {s} -->\n", .{@tagName(node.node_type)});
+                // ignore unknown nodes
             },
         }
     }
 
-    try w.writeAll("</body>\n</html>\n");
+    // Normalize EOF: ensure trailing single newline
+    if (out.items.len == 0 or out.items[out.items.len - 1] != '\n') {
+        try out.append('\n');
+    }
+
     return out.toOwnedSlice();
 }
 
-// ---------- tests ----------
-test "exportToHtml: minimal document with meta, heading, code" {
+// -------------------------
+// Unit tests
+// -------------------------
+
+test "latex_export: title/author + basic body" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(gpa.deinit() == .ok);
     const A = gpa.allocator();
@@ -183,35 +177,91 @@ test "exportToHtml: minimal document with meta, heading, code" {
     var root = ASTNode.init(A, NodeType.Document);
     defer root.deinit();
 
-    // @meta(title="Hello")
+    // Meta
     {
         var m = ASTNode.init(A, NodeType.Meta);
-        try m.attributes.put("title", "Hello");
+        try m.attributes.put("title", "My Doc");
+        try m.attributes.put("author", "Docz Team");
         try root.children.append(m);
     }
-    // <h1>Welcome</h1>
+    // Body
+    {
+        var h = ASTNode.init(A, NodeType.Heading);
+        try h.attributes.put("level", "2");
+        h.content = "Section";
+        try root.children.append(h);
+
+        var p = ASTNode.init(A, NodeType.Content);
+        p.content = "Hello **world**!";
+        try root.children.append(p);
+
+        var cb = ASTNode.init(A, NodeType.CodeBlock);
+        cb.content = "const x = 42;";
+        try root.children.append(cb);
+
+        var m = ASTNode.init(A, NodeType.Math);
+        m.content = "E = mc^2";
+        try root.children.append(m);
+
+        var img = ASTNode.init(A, NodeType.Media);
+        try img.attributes.put("src", "img/logo.png");
+        try root.children.append(img);
+    }
+
+    const tex = try exportAstToLatex(&root, A);
+    defer A.free(tex);
+
+    try std.testing.expect(std.mem.indexOf(u8, tex, "\\title{My Doc}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tex, "\\author{Docz Team}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tex, "\\subsection{Section}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tex, "Hello **world**!\n\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tex, "\\begin{verbatim}\nconst x = 42;\n\\end{verbatim}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tex, "\\begin{equation}\nE = mc^2\n\\end{equation}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tex, "\\includegraphics{img/logo.png}") != null);
+}
+
+// NEW: escaping in paragraph + heading
+test "latex_export: escape special chars in content and heading" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    var root = ASTNode.init(A, NodeType.Document);
+    defer root.deinit();
+
     {
         var h = ASTNode.init(A, NodeType.Heading);
         try h.attributes.put("level", "1");
-        h.content = "Welcome";
+        h.content = "Price is $5 & 10% off {today}";
         try root.children.append(h);
     }
-    // <pre><code>…</code></pre>
     {
-        var c = ASTNode.init(A, NodeType.CodeBlock);
-        c.content = "const x = 42;";
-        try root.children.append(c);
+        var p = ASTNode.init(A, NodeType.Content);
+        p.content = "Path A\\B with #hash _under_ ^caret~tilde";
+        try root.children.append(p);
+    }
+    // Code block should remain raw (no escaping applied)
+    {
+        var cb = ASTNode.init(A, NodeType.CodeBlock);
+        cb.content = "printf(\"100% done\\n\"); // keep % and \\";
+        try root.children.append(cb);
     }
 
-    const html = try exportToHtml(&root, A);
-    defer A.free(html);
+    const tex = try exportAstToLatex(&root, A);
+    defer A.free(tex);
 
-    try std.testing.expect(std.mem.indexOf(u8, html, "<title>Hello</title>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "<h1>Welcome</h1>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "<pre><code>const x = 42;</code></pre>") != null);
+    // Escaped in heading
+    try std.testing.expect(std.mem.indexOf(u8, tex, "\\section{Price is \\$5 \\& 10\\% off \\{today\\}}") != null);
+
+    // Escaped in paragraph (notice textbackslash/textasciicircum/textasciitilde)
+    try std.testing.expect(std.mem.indexOf(u8, tex, "Path A\\textbackslash{}B with \\#hash \\_under\\_ \\textasciicircum{}caret\\textasciitilde{}tilde") != null);
+
+    // Code block raw
+    try std.testing.expect(std.mem.indexOf(u8, tex, "\\begin{verbatim}\nprintf(\"100% done\\n\"); // keep % and \\\n\\end{verbatim}") != null);
 }
 
-test "exportToHtml: global + inline styles" {
+// NEW: empty blocks do not emit
+test "latex_export: empty math/paragraph do not emit" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(gpa.deinit() == .ok);
     const A = gpa.allocator();
@@ -220,26 +270,20 @@ test "exportToHtml: global + inline styles" {
     defer root.deinit();
 
     {
-        var s = ASTNode.init(A, NodeType.Style);
-        try s.attributes.put("mode", "global");
-        s.content =
-            \\heading-level-1: font-size=36px, font-weight=bold
-            \\body-text: font-family="Inter", line-height=1.6
-        ;
-        try root.children.append(s);
+        var p = ASTNode.init(A, NodeType.Content);
+        p.content = "   \n";
+        try root.children.append(p);
     }
     {
-        var s = ASTNode.init(A, NodeType.Style);
-        try s.attributes.put("mode", "inline");
-        try s.attributes.put("font-size", "18px");
-        try s.attributes.put("color", "blue");
-        s.content = "Styled";
-        try root.children.append(s);
+        var m = ASTNode.init(A, NodeType.Math);
+        m.content = "  \n";
+        try root.children.append(m);
     }
 
-    const html = try exportToHtml(&root, A);
-    defer A.free(html);
+    const tex = try exportAstToLatex(&root, A);
+    defer A.free(tex);
 
-    try std.testing.expect(std.mem.indexOf(u8, html, ".heading-level-1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "style=\"font-size:18px;color:blue;\"") != null);
+    // Should be only a trailing newline
+    try std.testing.expectEqual(@as(usize, 1), tex.len);
+    try std.testing.expectEqual(@as(u8, '\n'), tex[0]);
 }

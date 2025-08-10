@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
     docz_module.addOptions("build_options", build_opts);
 
     // ─────────────────────────────────────────────
-    // 🖥 CLI executable
+    // 🖥 CLI module (we'll attach converter imports before creating the exe)
     // ─────────────────────────────────────────────
     const cli_root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -31,17 +31,6 @@ pub fn build(b: *std.Build) void {
     });
     cli_root_module.addImport("docz", docz_module);
     cli_root_module.addOptions("build_options", build_opts);
-
-    const exe = b.addExecutable(.{
-        .name = "docz",
-        .root_module = cli_root_module,
-    });
-    b.installArtifact(exe);
-
-    const run_cmd = b.addRunArtifact(exe);
-    if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Run the Docz CLI");
-    run_step.dependOn(&run_cmd.step);
 
     // ─────────────────────────────────────────────
     // 🔒 Internal converter modules (not exported via root.zig)
@@ -94,6 +83,28 @@ pub fn build(b: *std.Build) void {
     });
     latex_export_mod.addOptions("build_options", build_opts);
     latex_export_mod.addImport("docz", docz_module);
+
+    // Expose converters to the CLI (so main.zig can @import them)
+    cli_root_module.addImport("html_import", html_import_mod);
+    cli_root_module.addImport("html_export", html_export_mod);
+    cli_root_module.addImport("md_import", md_import_mod);
+    cli_root_module.addImport("md_export", md_export_mod);
+    cli_root_module.addImport("latex_import", latex_import_mod);
+    cli_root_module.addImport("latex_export", latex_export_mod);
+
+    // ─────────────────────────────────────────────
+    // 🖥 CLI executable (after adding imports)
+    // ─────────────────────────────────────────────
+    const exe = b.addExecutable(.{
+        .name = "docz",
+        .root_module = cli_root_module,
+    });
+    b.installArtifact(exe);
+
+    const run_cmd = b.addRunArtifact(exe);
+    if (b.args) |args| run_cmd.addArgs(args);
+    const run_step = b.step("run", "Run the Docz CLI");
+    run_step.dependOn(&run_cmd.step);
 
     // ─────────────────────────────────────────────
     // 🧪 Unit tests (docz + each internal converter)
@@ -167,6 +178,7 @@ pub fn build(b: *std.Build) void {
     const e2e_run = b.addRunArtifact(e2e_tests);
     const e2e_step = b.step("test-e2e", "Run end-to-end tests");
     e2e_step.dependOn(&e2e_run.step);
+    e2e_step.dependOn(b.getInstallStep());
 
     // ─────────────────────────────────────────────
     // 🔁 Aggregate
