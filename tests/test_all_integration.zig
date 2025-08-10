@@ -5,6 +5,7 @@ comptime {
     _ = @import("integration/parser.zig");
     _ = @import("integration/renderer.zig");
     _ = @import("integration/pipeline.zig");
+    _ = @import("integration/convert_html_import.zig");
 }
 
 test {
