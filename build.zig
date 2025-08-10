@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -99,7 +100,15 @@ pub fn build(b: *std.Build) void {
         .name = "docz",
         .root_module = cli_root_module,
     });
+
+    // Normal install for users (zig build install)
     b.installArtifact(exe);
+
+    // Test-only install: a separate filename so e2e can run without locking docz(.exe)
+    const e2e_name = if (builtin.os.tag == .windows) "docz-e2e.exe" else "docz-e2e";
+    const e2e_install = b.addInstallArtifact(exe, .{
+        .dest_sub_path = b.fmt("bin/{s}", .{e2e_name}),
+    });
 
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| run_cmd.addArgs(args);
@@ -140,6 +149,76 @@ pub fn build(b: *std.Build) void {
     unit_step.dependOn(&latex_export_unit_run.step);
 
     // ─────────────────────────────────────────────
+    // 🧪 CLI unit tests (each CLI file is its own module-under-test)
+    // ─────────────────────────────────────────────
+    const cli_common_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/common.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_common_mod.addOptions("build_options", build_opts);
+    cli_common_mod.addImport("docz", docz_module);
+
+    const cli_convert_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/convert.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_convert_mod.addOptions("build_options", build_opts);
+    cli_convert_mod.addImport("docz", docz_module);
+    // convert.zig depends on internal converters — wire them in:
+    cli_convert_mod.addImport("html_import", html_import_mod);
+    cli_convert_mod.addImport("html_export", html_export_mod);
+    cli_convert_mod.addImport("md_import", md_import_mod);
+    cli_convert_mod.addImport("md_export", md_export_mod);
+    cli_convert_mod.addImport("latex_import", latex_import_mod);
+    cli_convert_mod.addImport("latex_export", latex_export_mod);
+
+    const cli_build_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/build_cmd.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_build_mod.addOptions("build_options", build_opts);
+    cli_build_mod.addImport("docz", docz_module);
+
+    const cli_preview_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/preview.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_preview_mod.addOptions("build_options", build_opts);
+    cli_preview_mod.addImport("docz", docz_module);
+
+    const cli_enable_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli/enable_wasm.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_enable_mod.addOptions("build_options", build_opts);
+    cli_enable_mod.addImport("docz", docz_module);
+
+    // Create test artifacts for each CLI module
+    const cli_common_unit = b.addTest(.{ .root_module = cli_common_mod });
+    const cli_convert_unit = b.addTest(.{ .root_module = cli_convert_mod });
+    const cli_build_unit = b.addTest(.{ .root_module = cli_build_mod });
+    const cli_preview_unit = b.addTest(.{ .root_module = cli_preview_mod });
+    const cli_enable_unit = b.addTest(.{ .root_module = cli_enable_mod });
+
+    const cli_common_run = b.addRunArtifact(cli_common_unit);
+    const cli_convert_run = b.addRunArtifact(cli_convert_unit);
+    const cli_build_run = b.addRunArtifact(cli_build_unit);
+    const cli_preview_run = b.addRunArtifact(cli_preview_unit);
+    const cli_enable_run = b.addRunArtifact(cli_enable_unit);
+
+    const cli_unit_step = b.step("test-cli", "Run CLI unit tests");
+    cli_unit_step.dependOn(&cli_common_run.step);
+    cli_unit_step.dependOn(&cli_convert_run.step);
+    cli_unit_step.dependOn(&cli_build_run.step);
+    cli_unit_step.dependOn(&cli_preview_run.step);
+    cli_unit_step.dependOn(&cli_enable_run.step);
+
+    // ─────────────────────────────────────────────
     // 🧪 Integration tests
     // ─────────────────────────────────────────────
     const integration_module = b.createModule(.{
@@ -178,7 +257,10 @@ pub fn build(b: *std.Build) void {
     const e2e_run = b.addRunArtifact(e2e_tests);
     const e2e_step = b.step("test-e2e", "Run end-to-end tests");
     e2e_step.dependOn(&e2e_run.step);
-    e2e_step.dependOn(b.getInstallStep());
+
+    // IMPORTANT: Depend on the test-only installed artifact,
+    // not the global install step (avoids overwriting a running docz.exe)
+    e2e_step.dependOn(&e2e_install.step);
 
     // ─────────────────────────────────────────────
     // 🔁 Aggregate
@@ -187,4 +269,5 @@ pub fn build(b: *std.Build) void {
     all_tests.dependOn(unit_step);
     all_tests.dependOn(integration_step);
     all_tests.dependOn(e2e_step);
+    all_tests.dependOn(cli_unit_step);
 }

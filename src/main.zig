@@ -1,99 +1,63 @@
 const std = @import("std");
-const tokenizer = @import("parser/tokenizer.zig");
-const parser = @import("parser/parser.zig");
-const renderer = @import("renderer/html.zig");
 
-/// Global constant for CLI usage text
+// Thin CLI dispatcher: each subcommand lives in src/cli/*.zig
+const cli_convert = @import("cli/convert.zig");
+const cli_build_cmd = @import("cli/build_cmd.zig");
+const cli_preview = @import("cli/preview.zig");
+const cli_enable = @import("cli/enable_wasm.zig");
+
+/// Global constant for CLI usage text (keeps original lines; adds convert/export)
 pub const USAGE_TEXT =
     \\Docz CLI Usage:
     \\  docz build <file.dcz>       Build .dcz file to HTML
     \\  docz preview                Start local preview server
     \\  docz enable wasm            Enable WASM execution support
+    \\  docz convert <input.{dcz|md|html|htm|tex}> [--to|-t <output.{dcz|md|html|tex}>]
+    \\  docz export  <input.{dcz|md|html|htm|tex}> [--to|-t <output.{dcz|md|html|tex}>]
     \\
 ;
 
-/// CLI entry point
+/// CLI entry point: parse args → dispatch to subcommand module.
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
     defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var it = try std.process.argsWithAllocator(A);
+    defer it.deinit();
 
-    if (args.len < 2) {
+    _ = it.next(); // program name
+    const cmd = it.next() orelse {
         printUsage();
+        return;
+    };
+
+    // Dispatch table
+    if (std.mem.eql(u8, cmd, "build")) {
+        try cli_build_cmd.run(A, &it);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "preview")) {
+        try cli_preview.run(A, &it);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "enable")) {
+        // enable_wasm expects the next token to be "wasm"
+        try cli_enable.run(A, &it);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "convert") or std.mem.eql(u8, cmd, "export")) {
+        try cli_convert.run(A, &it);
         return;
     }
 
-    const cmd = args[1];
-
-    if (std.mem.eql(u8, cmd, "build")) {
-        if (args.len < 3) {
-            std.debug.print("Error: Missing file path for 'build'\n", .{});
-            return;
-        }
-        try handleBuild(args[2]);
-    } else if (std.mem.eql(u8, cmd, "preview")) {
-        std.debug.print("Starting preview server...\n", .{});
-        // TODO: HTTP server
-    } else if (std.mem.eql(u8, cmd, "enable") and args.len >= 3 and std.mem.eql(u8, args[2], "wasm")) {
-        std.debug.print("Enabling WASM execution support...\n", .{});
-        // TODO: WASM logic
-    } else {
-        printUsage();
-    }
+    printUsage();
 }
 
-/// Prints usage help text
+/// Prints usage help text (no std.io handles → portable across nightlies)
 fn printUsage() void {
+    // std.debug.print writes to stderr on most toolchains; that’s fine for usage/help.
     std.debug.print("{s}", .{USAGE_TEXT});
-}
-
-/// Handles the `docz build file.dcz` command
-fn handleBuild(file_path: []const u8) !void {
-    // Open input file
-    var file = try std.fs.cwd().openFile(file_path, .{});
-    defer file.close();
-
-    const stat = try file.stat();
-    const buffer = try std.heap.page_allocator.alloc(u8, stat.size);
-    defer std.heap.page_allocator.free(buffer);
-
-    _ = try file.readAll(buffer);
-
-    // Tokenize
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-    defer std.debug.assert(gpa.deinit() == .ok);
-
-    const tokens = try tokenizer.tokenize(buffer, allocator);
-    defer allocator.free(tokens);
-
-    // Parse
-    var ast = try parser.parse(tokens, allocator);
-    defer {
-        for (ast.children.items) |*child| {
-            child.attributes.deinit();
-            child.children.deinit();
-        }
-        ast.children.deinit();
-    }
-
-    // Render
-    const html = try renderer.renderHTML(&ast, allocator);
-    defer allocator.free(html);
-
-    // Output
-    const out_file_name = try std.fmt.allocPrint(allocator, "{s}.html", .{file_path});
-    defer allocator.free(out_file_name);
-
-    var out_file = try std.fs.cwd().createFile(out_file_name, .{});
-    defer out_file.close();
-
-    _ = try out_file.write(html);
-
-    std.debug.print("✔ Built {s} → {s}\n", .{ file_path, out_file_name });
 }
 
 // Simple test for CLI usage message
@@ -102,7 +66,7 @@ test "CLI usage message prints" {
     var fbs = std.io.fixedBufferStream(&buffer);
     const writer = fbs.writer();
 
-    try writer.print("{s}", .{USAGE_TEXT});
+    try writer.writeAll(USAGE_TEXT);
 
     const written = fbs.getWritten();
     try std.testing.expect(std.mem.indexOf(u8, written, "docz build") != null);

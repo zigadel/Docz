@@ -1,7 +1,7 @@
 const std = @import("std");
 const docz = @import("docz");
 
-// internal converters (build.zig already wires these into the CLI root module)
+// internal converters (wired via build.zig)
 const html_import = @import("html_import");
 const html_export = @import("html_export");
 const md_import = @import("md_import");
@@ -14,14 +14,10 @@ pub const Kind = enum { dcz, md, html, tex };
 fn detectKindFromPath(p: []const u8) ?Kind {
     const ext = std.fs.path.extension(p);
     if (ext.len == 0) return null;
-
-    var buf: [16]u8 = undefined;
-    const e = std.ascii.lowerString(&buf, ext) catch ext;
-
-    if (std.mem.eql(u8, e, ".dcz")) return .dcz;
-    if (std.mem.eql(u8, e, ".md")) return .md;
-    if (std.mem.eql(u8, e, ".html") or std.mem.eql(u8, e, ".htm")) return .html;
-    if (std.mem.eql(u8, e, ".tex")) return .tex;
+    if (std.ascii.eqlIgnoreCase(ext, ".dcz")) return .dcz;
+    if (std.ascii.eqlIgnoreCase(ext, ".md")) return .md;
+    if (std.ascii.eqlIgnoreCase(ext, ".html") or std.ascii.eqlIgnoreCase(ext, ".htm")) return .html;
+    if (std.ascii.eqlIgnoreCase(ext, ".tex")) return .tex;
     return null;
 }
 
@@ -32,16 +28,21 @@ fn readFileAlloc(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
 }
 
 fn writeFile(path: []const u8, data: []const u8) !void {
-    var f = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    const cwd = std.fs.cwd();
+    if (std.fs.path.dirname(path)) |dirpart| {
+        try cwd.makePath(dirpart);
+    }
+    var f = try cwd.createFile(path, .{ .truncate = true });
     defer f.close();
-    _ = try f.writeAll(data);
+    try f.writeAll(data);
 }
 
 pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
+    const usage =
+        "Usage: docz convert <input.{dcz|md|html|htm|tex}> [--to|-t <output.{dcz|md|html|tex}>]\n";
+
     const in_path = it.next() orelse {
-        try std.io.getStdErr().writer().writeAll(
-            "Usage: docz convert <input.{dcz|md|html|htm|tex}> [--to|-t <output.{dcz|md|html|tex}>]\n",
-        );
+        std.debug.print("{s}", .{usage});
         return error.Invalid;
     };
 
@@ -50,33 +51,43 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     while (it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--to") or std.mem.eql(u8, arg, "-t")) {
             out_path = it.next() orelse {
-                try std.io.getStdErr().writer().writeAll("convert: --to requires a value\n");
+                std.debug.print("{s}", .{"convert: --to requires a value\n"});
                 return error.Invalid;
             };
         } else {
-            try std.io.getStdErr().writer().print("convert: unknown arg: {s}\n", .{arg});
+            std.debug.print("convert: unknown arg: {s}\n", .{arg});
             return error.Invalid;
         }
     }
 
     const in_kind = detectKindFromPath(in_path) orelse {
-        try std.io.getStdErr().writer().print("convert: unsupported input type: {s}\n", .{in_path});
+        std.debug.print("convert: unsupported input type: {s}\n", .{in_path});
         return error.Invalid;
     };
 
-    const input = try readFileAlloc(alloc, in_path);
+    const input = readFileAlloc(alloc, in_path) catch |e| {
+        // Leak-safe cwd reporting
+        const cwd_buf: ?[]u8 = std.fs.cwd().realpathAlloc(alloc, ".") catch null;
+        defer if (cwd_buf) |buf| alloc.free(buf);
+        const cwd = cwd_buf orelse "<?>";
+
+        std.debug.print("convert: failed to read '{s}' (cwd: {s}): {s}\n", .{ in_path, cwd, @errorName(e) });
+        return e;
+    };
     defer alloc.free(input);
 
-    var out_buf: []u8 = &[_]u8{}; // will be reassigned
+    var out_buf: []u8 = &[_]u8{};
     defer if (out_buf.len != 0 and out_buf.ptr != input.ptr) alloc.free(out_buf);
 
     if (in_kind == .dcz) {
-        // Parse DCZ → AST once
+        // DCZ -> AST
         const tokens = try docz.Tokenizer.tokenize(input, alloc);
         defer {
+            // If Tokenizer allocates per-token payloads, free them first, then the array.
             docz.Tokenizer.freeTokens(alloc, tokens);
             alloc.free(tokens);
         }
+
         var ast = try docz.Parser.parse(tokens, alloc);
         defer ast.deinit();
 
@@ -86,9 +97,9 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
             out_buf = try alloc.dupe(u8, input);
         } else switch (out_kind.?) {
             .md => out_buf = try md_export.exportAstToMarkdown(&ast, alloc),
-            .html => out_buf = try html_export.exportAstToHtml(&ast, alloc),
+            .html => out_buf = try html_export.exportHtml(&ast, alloc), // symbol in src/convert/html/export.zig
             .tex => out_buf = try latex_export.exportAstToLatex(&ast, alloc),
-            .dcz => unreachable, // handled above
+            .dcz => unreachable,
         }
     } else {
         // Import -> DCZ
@@ -102,11 +113,21 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
 
     if (out_path) |p| {
         if (detectKindFromPath(p) == null) {
-            try std.io.getStdErr().writer().print("convert: unsupported output type: {s}\n", .{p});
+            std.debug.print("convert: unsupported output type: {s}\n", .{p});
             return error.Invalid;
         }
         try writeFile(p, out_buf);
     } else {
-        try std.io.getStdOut().writer().writeAll(out_buf);
+        // Print buffer (Zig 0.15 dev: use debug.print for portability)
+        std.debug.print("{s}", .{out_buf});
     }
+}
+
+test "convert.detectKindFromPath: basic mapping" {
+    try std.testing.expect(detectKindFromPath("a.dcz") == .dcz);
+    try std.testing.expect(detectKindFromPath("a.MD") == .md);
+    try std.testing.expect(detectKindFromPath("a.html") == .html);
+    try std.testing.expect(detectKindFromPath("a.HTM") == .html);
+    try std.testing.expect(detectKindFromPath("a.tex") == .tex);
+    try std.testing.expect(detectKindFromPath("noext") == null);
 }
