@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="status" content="DRAFT">
+<meta name="updated" content="2025‑08‑10">
+<meta name="version" content="0.1.0">
+<title>Docz Mini‑Spec v0</title>
+</head>
+<body>
+<h1>Docz Mini‑Spec v0</h1>
+<p>This is the **single source of truth** for the `.dcz` format for Milestone M0→M1.</p>
+<p>Everything in core (tokenizer, parser, AST, converters, preview, and plugins) MUST conform to this spec.</p>
+<p>Spec changes require tests and MUST be documented here before merge.</p>
+<h2>Scope</h2>
+<p>This spec defines:</p>
+<p>- Lexical rules (tokens, escaping).</p>
+<p>- Block structure (directives, attributes, nesting).</p>
+<p>- Canonical AST node set and required attributes.</p>
+<p>- Determinism requirements for round‑trips.</p>
+<p>- Validation & sanitization rules (MUST/SHOULD).</p>
+<p>- Diagnostics shape (error categories + spans).</p>
+<p>It also inventories **planned directives**. Unimplemented directives are marked *PLANNED*; validators SHOULD accept them as unknown-by-core but MAY allow via plugins.</p>
+<h2>Lexical Rules</h2>
+<p>Whitespace is UTF‑8. Lines end with `\n`. The tokenizer recognizes:</p>
+<p>- `</p>
+<p>` introducer at start of a directive.</p>
+<p>- Parameter list: `(</p>
+<p>@</p>
+<p>-separated attributes)` — see “Attributes”.</p>
+<p>- `</p>
+<p>` closes a directive block. **Directives MUST be closed** (no implicit closures).</p>
+<p>- Plain paragraphs are sequences of non-directive lines separated by blank lines.</p>
+<p>- Code and Math are fenced blocks opened by `</p>
+<pre><code>@math
+` and closed by `
+</code></pre>
+<p>`.</p>
+<p>- Inline escaping inside blocks uses `</p>
+<p>@`</p>
+<p>to represent a literal `</p>
+<p>@</p>
+<p>`.</p>
+<p>- Backslash escapes in text are **NOT** interpreted by Docz (left for exporters), except where noted by converters.</p>
+<h3>Attributes</h3>
+<p>Attributes are comma‑separated key/value pairs inside `()`:</p>
+<pre><code>key="string", key2=123, flag=true</code></pre>
+<p>Rules:</p>
+<p>- Keys: `[a‑zA‑Z_][a‑zA‑Z0‑9_\-]*`</p>
+<p>- Values: unquoted numbers/booleans OR quoted strings (`"..."`) with `\"` for quotes, `\\` for backslash.</p>
+<p>- Ordering is **not significant**; exporters MAY reorder deterministically (lexicographic by key).</p>
+<h2>Blocks & Directives</h2>
+<p>A directive has this form:</p>
+<pre><code>@name
+k
+v
+k
+flag
+true
+...block content...
+</code></pre>
+<h3>Core Directives (Implemented)</h3>
+<p>These MUST be supported by core and round‑trip converters.</p>
+<pre><code>@meta
+:     Top‑level only. Key/values become document metadata (title, author, version, etc.). No content.
+@heading
+:  Attributes: level=1..6 (required). Content is inline text on same line after closing ')'. No nested blocks.
+@code
+:     Attributes: language="" (optional), execute=false (reserved). Content: raw preformatted until 
+</code></pre>
+<p>.</p>
+<div class="math">:     Attributes: none (for v0). Content: raw math until </div>
+<p>.</p>
+<h3>Extended Directives (PLANNED)</h3>
+<p>Core validator MUST recognize the spelling and basic shape; deeper semantics may be delegated to plugins.</p>
+<p>Exporters MAY no‑op until implemented.</p>
+<pre><code>@style
+-def(...): Define named style tokens; content contains style rules. (PLANNED)
+@data
+:      Attributes: format=("json"|"yaml"|"csv"|...). Content is raw data. (PLANNED)
+@plot
+:      Attributes: type, x=, y=, etc.; or content as data block. (PLANNED)
+@video
+:     Attributes: src, controls=true|false, poster? (PLANNED)
+@audio
+:     Attributes: src, controls=true|false (PLANNED)
+@pdf
+:       Attributes: src, page? (PLANNED)
+@embed
+:     Attributes: type, source, width?, height? (PLANNED)
+@graph
+:     Attributes: type ("imports"|"links"|...); content lists nodes/edges. (PLANNED)
+@logic
+:     Attributes: none; content is script to be executed in sandbox (WASM/JS). (PLANNED)
+</code></pre>
+<h2>Structural Rules</h2>
+<p>- Document root is an implicit `Document` node containing a linear list of blocks.</p>
+<p>- `</p>
+<p>- `</p>
+<hn>` is a block header with inline text on the same line: `</hn>
+<h2>My Title</h2>
+<p>`.</p>
+<p>- `</p>
+<pre><code>@math
+` / `
+@data
+` are multi‑line blocks terminated by `
+</code></pre>
+<p>`. Content is NOT parsed for nested directives.</p>
+<p>- `</p>
+<p>- Unknown directives: core MUST retain them as `Unknown(name, attributes, raw_block?)` for round‑trip safety.</p>
+<p>- Nesting: v0 forbids nested directives (everything is flat). Future versions MAY allow limited nesting via plugins.</p>
+<h2>Canonical AST (v0)</h2>
+<p>Core nodes and required attributes:</p>
+<pre><code>Meta:      attrs:{string→string} (title, author, version, ...); no content
+Heading:   attrs:{level:string}; content:string (inline text)
+Content:   content:string (paragraph text)
+CodeBlock: attrs:{language?:string, execute?:bool}; content:string (verbatim)
+Math:      content:string (verbatim)
+Media:     attrs:{src:string, kind:"image"|"video"|"audio"|"pdf", width?:string, height?:string}; no content for v0
+Import:    attrs:{href:string, type?:"stylesheet"|"script"}; no content
+Style:     attrs:{...}; content:string (opaque)
+Unknown:   attrs:{...}; name:string; content?:string
+</code></pre>
+<p>Mapping from directives to AST:</p>
+<pre><code>@meta
+→ Meta
+@heading
+→ Heading
+(plain text)  → Content (paragraphs; blank-line separated)
+@code
+→ CodeBlock
+@math
+→ Math
+@image
+→ Media(kind="image")
+@video
+→ Media(kind="video")     (PLANNED → Unknown until implemented)
+@audio
+→ Media(kind="audio")     (PLANNED → Unknown until implemented)
+@pdf
+→ Media(kind="pdf")       (PLANNED → Unknown until implemented)
+@import
+→ Import
+@style
+→ Style
+(others)      → Unknown(name=..., attrs=..., content?)
+</code></pre>
+<h2>Determinism & Round‑Trip</h2>
+<p>- Converters MUST be deterministic given the same AST and options.</p>
+<p>- Whitespace policy:</p>
+<p>- Paragraphs normalize trailing whitespace; internal spacing preserved.</p>
+<p>- Code/Math are preserved verbatim except trimming a trailing `\n\n` may occur during export; importers MUST normalize back.</p>
+<p>- Attribute order in serialized forms MUST be stable (lexicographic by key).</p>
+<p>- Unknown nodes MUST be preserved across `dcz → X → dcz` (opaque pass‑through).</p>
+<h2>Validation Rules (core/validate.zig)</h2>
+<p>The validator MUST enforce:</p>
+<pre><code>- All directives are closed by 
+</code></pre>
+<p>when required.</p>
+<p>- No nesting in v0 (report error if a directive appears inside a block content).</p>
+<p>- Attributes: keys unique per node; values match expected types.</p>
+<p>[META]</p>
+<p>- Only at top of document until first non-Meta node.</p>
+<p>- Keys: any string; recommended: title, author, version, keywords, updated.</p>
+<p>[HEADING]</p>
+<p>- level ∈ {1..6}; content non-empty.</p>
+<p>- No trailing spaces inside level attribute value.</p>
+<p>[CODE]</p>
+<p>- language: string (may be empty); execute: boolean (default false).</p>
+<p>- Content may be empty (allowed).</p>
+<p>[MATH]</p>
+<p>- Content may be empty (validator MAY warn).</p>
+<p>[MEDIA]</p>
+<p>- src: non-empty string; width/height if present must be strings (pass-through).</p>
+<p>[IMPORT]</p>
+<p>- href: non-empty. type optional: "stylesheet"|"script".</p>
+<p>[STYLE]</p>
+<p>- Opaque: always valid; warn if empty.</p>
+<p>Failure categories:</p>
+<pre><code>E100: Unexpected EOF (missing </code></pre>
+<p>)</p>
+<p>E110: Unknown directive (if strict mode enabled)</p>
+<p>E120: Disallowed nesting in v0</p>
+<p>E130: Duplicate attribute key</p>
+<p>E140: Invalid attribute type/value</p>
+<p>E150: Meta after body content</p>
+<p>E160: Missing required attribute</p>
+<p>W200: Empty content (Math/Style), allowed but questionable</p>
+<h2>Sanitization Rules (core/sanitize.zig)</h2>
+<p>Sanitizer SHOULD:</p>
+<pre><code>- Normalize consecutive blank lines to a single blank line.
+- Canonicalize attribute ordering (lexicographic by key).
+- Clamp heading level into [1,6].
+- Remove entirely empty nodes (except CodeBlock — keep empty code).
+</code></pre>
+<h2>Diagnostics Shape</h2>
+<p>CLI MUST be able to print human‑readable and JSON forms. JSON schema (minimal v0):</p>
+<pre><code>"file": "path/to/doc.dcz",
+"errors": [
+{
+"code": "E160",
+"message": "Missing required attribute 'level'",
+"span": { "line": 12, "col": 1, "endLine": 12, "endCol": 20 },
+"node": "Heading"
+}
+],
+"warnings": [
+{
+"code": "W200",
+"message": "Empty math block",
+"span": { "line": 33, "col": 1, "endLine": 35, "endCol": 5 },
+"node": "Math"
+}
+]
+}
+</code></pre>
+<h2>Compliance Checklist (for PRs)</h2>
+<p>- [ ] SPEC.dcz updated (this file) with any format/behavior change.</p>
+<p>- [ ] Unit tests for tokenizer/parser/validators updated.</p>
+<p>- [ ] Snapshot round‑trip tests updated for md/html/tex.</p>
+<p>- [ ] Deterministic output verified on all three OSes in CI.</p>
+<p>- [ ] Diagnostics include accurate spans and codes.</p>
+<h2>Appendix A: Mini‑Grammar (Informal)</h2>
+<pre><code>Meta        := "
+@meta
+AttrList
+" WS "
+</code></pre>
+<p>" NL</p>
+<p>Heading     := "</p>
+<h Int >" WS InlineText WS "</h Int >
+<p>" NL</p>
+<p>CodeBlock   := "</p>
+<pre><code>AttrList
+" NL CodeBody "
+</code></pre>
+<p>" NL</p>
+<p>Math        := "</p>
+<div class="math">AttrList
+" NL MathBody "
+</div>
+<p>" NL</p>
+<p>Image       := "</p>
+<p>" WS "</p>
+<p>" NL</p>
+<p>Import      := "</p>
+<p>" WS "</p>
+<p>" NL</p>
+<p>Style       := "</p>
+<p>" NL</p>
+<p>Unknown     := "</p>
+<p>@</p>
+<p>" Ident "(" AttrList? ")" (NL Body "</p>
+<p>" NL | WS "</p>
+<p>" NL)</p>
+<p>Paragraph   := TextLine+ NL</p>
+<p>AttrList    := Attr ("," WS Attr)*</p>
+<p>Attr        := Ident "=" (Number | Bool | String)</p>
+<p>Ident       := [A-Za-z_][A-Za-z0-9_\-]*</p>
+<p>Number      := [0-9]+</p>
+<p>Bool        := "true" | "false"</p>
+<p>String      := "\"" ( [^"\\] | "\\\"" | "\\\\" )* "\""</p>
+<p>InlineText  := (not NL, may contain spaces, supports "</p>
+<p>@"</p>
+<p>for literal "</p>
+<p>@</p>
+<p>")</p>
+<h2>Appendix B: Directive Inventory</h2>
+<p>This table tracks implementation status for core + planned directives (update as features land).</p>
+<pre><code>------------+------------+----------+---------------+-------------+--------------
+meta        | CORE       | Meta     | head/meta     | front-matter| \title/\author
+heading     | CORE       | Heading  | <h1..h6>      | #..######    | \sec/\sub..
+code        | CORE       | CodeBlock| <pre><code>   | ``` ```      | verbatim
+math        | CORE       | Math     | <div class=..>| $$/$$        | equation
+image       | CORE       | Media    | <img>         | ![]()        | \includegraphics
+import      | CORE       | Import   | <link>        | (no-op)      | (no-op)
+style       | CORE       | Style    | (ignored v0)  | (ignored v0) | (ignored v0)
+style-def   | PLANNED    | Style    | (tbd)         | (tbd)        | (tbd)
+data        | PLANNED    | Unknown  | (tbd)         | (tbd)        | (tbd)
+plot        | PLANNED    | Unknown  | (tbd)         | (tbd)        | (tbd)
+video       | PLANNED    | Media    | <video>       | (link)       | (no-op)
+audio       | PLANNED    | Media    | <audio>       | (link)       | (no-op)
+pdf         | PLANNED    | Media    | (embed)       | (link)       | (no-op)
+embed       | PLANNED    | Unknown  | (tbd)         | (tbd)        | (tbd)
+graph       | PLANNED    | Unknown  | (tbd)         | (tbd)        | (tbd)
+logic       | PLANNED    | Unknown  | (tbd)         | (tbd)        | (tbd)
+</code></pre>
+<h2>Versioning</h2>
+<p>- This file’s `version` field tracks spec compatibility.</p>
+<p>- Breaking changes bump MINOR while in v0 (0.x). Once stable, follow SemVer (MAJOR.MINOR.PATCH).</p>
+</body>
+</html>

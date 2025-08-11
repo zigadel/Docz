@@ -6,7 +6,7 @@ const Tokenizer = @import("../src/parser/tokenizer.zig");
 const Parser = @import("../src/parser/parser.zig");
 const Renderer = @import("../src/renderer/html.zig");
 
-/// Writes SSE bytes to an in-flight streaming HTTP response (kept for later).
+/// Writes SSE bytes to an in-flight streaming HTTP response (currently unused).
 const SinkWrap = struct {
     res_ptr: *std.http.Server.Response,
 
@@ -45,25 +45,41 @@ pub const PreviewServer = struct {
     pub fn listenAndServe(self: *PreviewServer, port: u16) !void {
         const addr = try std.net.Address.parseIp4("127.0.0.1", port);
 
-        // Your snapshot uses Address.listen(address, options)
         var tcp = try std.net.Address.listen(addr, .{ .reuse_address = true });
         defer tcp.deinit();
 
         std.debug.print("🔎 web-preview listening on http://127.0.0.1:{d}\n", .{port});
 
+        // (Optional) background watcher — harmless if the file doesn't exist.
         _ = try std.Thread.spawn(.{}, pollFileAndBroadcast, .{ &self.broadcaster, "docs/SPEC.dcz", 250 });
 
         while (true) {
+            const t_accept = std.time.milliTimestamp();
             const net_conn = try tcp.accept();
+            defer net_conn.stream.close();
 
             var read_buf: [16 * 1024]u8 = undefined;
             var http = std.http.Server.init(net_conn, &read_buf);
-            defer net_conn.stream.close();
 
-            while (true) {
-                var req = http.receiveHead() catch break;
-                try self.handle(&http, &req);
-            }
+            // Serve exactly one request per TCP connection so we never “hang” on keep-alive.
+            var req = http.receiveHead() catch |e| {
+                std.debug.print("❌ receiveHead error after accept (+{d}ms): {s}\n", .{ std.time.milliTimestamp() - t_accept, @errorName(e) });
+                continue;
+            };
+
+            // Basic request line logging
+            std.debug.print("→ {s} {s}\n", .{ @tagName(req.head.method), req.head.target });
+
+            // Handle; if it throws, send 500 so the client doesn’t spin forever.
+            self.handle(&http, &req) catch |e| {
+                std.debug.print("❌ handler error: {s}\n", .{@errorName(e)});
+                const msg = "Internal server error\n";
+                // Best-effort: try to reply; if this fails, we just close the socket.
+                _ = req.respond(msg, .{
+                    .status = .internal_server_error,
+                    .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain; charset=utf-8" }},
+                }) catch {};
+            };
         }
     }
 
@@ -71,13 +87,30 @@ pub const PreviewServer = struct {
         _ = _srv;
         const path = req.head.target;
 
-        if (std.mem.eql(u8, stripQuery(path), "/_events")) {
-            return self.handleSSE(req);
+        if (std.mem.eql(u8, stripQuery(path), "/ping")) {
+            // Quick sanity check endpoint
+            return req.respond("pong\n", .{
+                .status = .ok,
+                .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain; charset=utf-8" }},
+            });
+        }
+
+        if (std.mem.eql(u8, stripQuery(path), "/favicon.ico")) {
+            return req.respond("", .{
+                .status = .no_content,
+                .extra_headers = &.{.{ .name = "Cache-Control", .value = "no-store" }},
+            });
+        }
+
+        if (std.mem.startsWith(u8, path, "/render")) {
+            const fs_path = queryParam(path, "path") orelse "docs/SPEC.dcz";
+            std.debug.print("  route=/render path={s}\n", .{fs_path});
+            return self.serveRenderedFragment(req, fs_path);
         }
 
         if (std.mem.startsWith(u8, path, "/view")) {
-            const maybe = queryParam(path, "path");
-            const fs_path = maybe orelse "docs/SPEC.dcz";
+            const fs_path = queryParam(path, "path") orelse "docs/SPEC.dcz";
+            std.debug.print("  route=/view path={s}\n", .{fs_path});
             return self.serveRenderedDcz(req, fs_path);
         }
 
@@ -85,12 +118,14 @@ pub const PreviewServer = struct {
         defer self.allocator.free(safe_rel);
 
         if (safe_rel.len == 0 or std.mem.eql(u8, safe_rel, ".")) {
+            std.debug.print("  route=/ (index)\n", .{});
             return self.serveIndex(req);
         }
 
         const candidate_a = try join2(self.allocator, self.doc_root, safe_rel);
         defer self.allocator.free(candidate_a);
         if (fileExists(candidate_a)) {
+            std.debug.print("  route=static hit={s}\n", .{candidate_a});
             return self.serveFile(req, candidate_a);
         }
 
@@ -99,13 +134,15 @@ pub const PreviewServer = struct {
         const candidate_b = try join2(self.allocator, self.doc_root, rel_html);
         defer self.allocator.free(candidate_b);
         if (fileExists(candidate_b)) {
+            std.debug.print("  route=static hit={s}\n", .{candidate_b});
             return self.serveFile(req, candidate_b);
         }
 
+        std.debug.print("  route=fallback → index\n", .{});
         return self.serveIndex(req);
     }
 
-    // Simple non-streaming placeholder for now.
+    // Placeholder (no streaming in this snapshot).
     fn handleSSE(self: *PreviewServer, req: *std.http.Server.Request) !void {
         _ = self;
         const body = "SSE not enabled on this Zig build.\n";
@@ -124,6 +161,64 @@ pub const PreviewServer = struct {
         const html = try buildIndexHtml(self.allocator);
         defer self.allocator.free(html);
 
+        const cl = try u64ToTmp(self.allocator, html.len);
+        // It's fine to leak per-request a tiny header string for now; you can pool later.
+        return req.respond(html, .{
+            .status = .ok,
+            .extra_headers = &.{
+                .{ .name = "Content-Type", .value = "text/html; charset=utf-8" },
+                .{ .name = "Content-Length", .value = cl },
+                .{ .name = "Cache-Control", .value = "no-cache" },
+                .{ .name = "Connection", .value = "close" },
+            },
+        });
+    }
+
+    fn serveRenderedDcz(self: *PreviewServer, req: *std.http.Server.Request, fs_path: []const u8) !void {
+        const A = self.allocator;
+
+        const t0 = std.time.milliTimestamp();
+        const input = readFileAlloc(A, fs_path) catch |e| {
+            std.debug.print("  read FAIL {s}: {s}\n", .{ fs_path, @errorName(e) });
+            const body = try std.fmt.allocPrint(A, "<pre>Failed to read {s}: {s}</pre>", .{ fs_path, @errorName(e) });
+            defer A.free(body);
+            return req.respond(body, .{
+                .status = .ok,
+                .extra_headers = &.{.{ .name = "Content-Type", .value = "text/html; charset=utf-8" }},
+            });
+        };
+        defer A.free(input);
+        std.debug.print("  read ok {s} ({d} bytes, {d}ms)\n", .{ fs_path, input.len, std.time.milliTimestamp() - t0 });
+
+        const t1 = std.time.milliTimestamp();
+        const tokens = Tokenizer.tokenize(input, A) catch |e| {
+            const msg = try std.fmt.allocPrint(
+                A,
+                "<pre>Tokenizer error: {s}\n(unterminated directive params or invalid syntax?)</pre>",
+                .{@errorName(e)},
+            );
+            defer A.free(msg);
+            return req.respond(msg, .{
+                .status = .ok,
+                .extra_headers = &.{.{ .name = "Content-Type", .value = "text/html; charset=utf-8" }},
+            });
+        };
+        defer {
+            Tokenizer.freeTokens(A, tokens);
+            A.free(tokens);
+        }
+        std.debug.print("  tokenize ok ({d} tokens, {d}ms)\n", .{ tokens.len, std.time.milliTimestamp() - t1 });
+
+        const t2 = std.time.milliTimestamp();
+        var ast = try Parser.parse(tokens, A);
+        defer ast.deinit();
+        std.debug.print("  parse ok ({d} nodes, {d}ms)\n", .{ ast.children.items.len, std.time.milliTimestamp() - t2 });
+
+        const t3 = std.time.milliTimestamp();
+        const html = try Renderer.renderHTML(&ast, A);
+        defer A.free(html);
+        std.debug.print("  render ok ({d} bytes, {d}ms)\n", .{ html.len, std.time.milliTimestamp() - t3 });
+
         return req.respond(html, .{
             .status = .ok,
             .extra_headers = &.{
@@ -133,36 +228,57 @@ pub const PreviewServer = struct {
         });
     }
 
-    fn serveRenderedDcz(self: *PreviewServer, req: *std.http.Server.Request, fs_path: []const u8) !void {
+    fn serveRenderedFragment(self: *PreviewServer, req: *std.http.Server.Request, fs_path: []const u8) !void {
         const A = self.allocator;
 
+        const t0 = std.time.milliTimestamp();
         const input = readFileAlloc(A, fs_path) catch |e| {
+            std.debug.print("  read FAIL {s}: {s}\n", .{ fs_path, @errorName(e) });
             const body = try std.fmt.allocPrint(A, "<pre>Failed to read {s}: {s}</pre>", .{ fs_path, @errorName(e) });
             defer A.free(body);
             return req.respond(body, .{
                 .status = .ok,
-                .extra_headers = &.{
-                    .{ .name = "Content-Type", .value = "text/html; charset=utf-8" },
-                },
+                .extra_headers = &.{.{ .name = "Content-Type", .value = "text/html; charset=utf-8" }},
             });
         };
         defer A.free(input);
+        std.debug.print("  read ok {s} ({d} bytes, {d}ms)\n", .{ fs_path, input.len, std.time.milliTimestamp() - t0 });
 
-        // DCZ -> tokens -> AST
-        const tokens = try Tokenizer.tokenize(input, A);
+        const t1 = std.time.milliTimestamp();
+        const tokens = Tokenizer.tokenize(input, A) catch |e| {
+            const msg = try std.fmt.allocPrint(
+                A,
+                "<pre>Tokenizer error: {s}\n(unterminated directive params or invalid syntax?)</pre>",
+                .{@errorName(e)},
+            );
+            defer A.free(msg);
+            return req.respond(msg, .{
+                .status = .ok,
+                .extra_headers = &.{.{ .name = "Content-Type", .value = "text/html; charset=utf-8" }},
+            });
+        };
         defer {
             Tokenizer.freeTokens(A, tokens);
             A.free(tokens);
         }
+        std.debug.print("  tokenize ok ({d} tokens, {d}ms)\n", .{ tokens.len, std.time.milliTimestamp() - t1 });
 
+        const t2 = std.time.milliTimestamp();
         var ast = try Parser.parse(tokens, A);
         defer ast.deinit();
+        std.debug.print("  parse ok ({d} nodes, {d}ms)\n", .{ ast.children.items.len, std.time.milliTimestamp() - t2 });
 
-        // AST -> HTML
-        const html = try Renderer.renderHTML(&ast, A);
-        defer A.free(html);
+        const t3 = std.time.milliTimestamp();
+        const full = try Renderer.renderHTML(&ast, A);
+        defer A.free(full);
+        std.debug.print("  render ok ({d} bytes, {d}ms)\n", .{ full.len, std.time.milliTimestamp() - t3 });
 
-        return req.respond(html, .{
+        const t4 = std.time.milliTimestamp();
+        const frag = try extractBodyFragment(A, full);
+        defer A.free(frag);
+        std.debug.print("  extract body ok ({d} bytes, {d}ms)\n", .{ frag.len, std.time.milliTimestamp() - t4 });
+
+        return req.respond(frag, .{
             .status = .ok,
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "text/html; charset=utf-8" },
@@ -206,6 +322,7 @@ fn trimTrailingSlash(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
     return allocator.dupe(u8, s[0..end]);
 }
 
+/// Prevent path traversal. Returns normalized relative path without leading '/'.
 fn sanitizePath(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
     var norm = std.ArrayList(u8).init(allocator);
     defer norm.deinit();
@@ -260,12 +377,7 @@ fn join2(allocator: std.mem.Allocator, a: []const u8, b: []const u8) ![]const u8
 }
 
 fn fileExists(abs_path: []const u8) bool {
-    std.fs.cwd().access(abs_path, .{}) catch |err| {
-        switch (err) {
-            error.FileNotFound => return false,
-            else => return false,
-        }
-    };
+    std.fs.cwd().access(abs_path, .{}) catch return false;
     return true;
 }
 
@@ -304,6 +416,7 @@ fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return try f.readToEndAlloc(allocator, 1 << 26);
 }
 
+// Poll a file and broadcast "reload" on mtime change (kept for future SSE use).
 fn pollFileAndBroadcast(b: *hot.Broadcaster, path: []const u8, ms: u64) !void {
     var last: u64 = 0;
     while (true) {
@@ -323,6 +436,20 @@ fn fileMtime(path: []const u8) !u64 {
     return @intCast(s.mtime);
 }
 
+/// Extract inner <body>…</body> from full HTML; if no <body>, return whole.
+fn extractBodyFragment(allocator: std.mem.Allocator, full: []const u8) ![]u8 {
+    const open_idx = std.mem.indexOf(u8, full, "<body");
+    if (open_idx == null) return allocator.dupe(u8, full);
+
+    const after_open_gt = std.mem.indexOfScalarPos(u8, full, open_idx.?, '>') orelse return allocator.dupe(u8, full);
+    const rest = full[after_open_gt + 1 ..];
+    const close_idx_rel = std.mem.indexOf(u8, rest, "</body>");
+    if (close_idx_rel == null) return allocator.dupe(u8, rest);
+
+    const inner = rest[0..close_idx_rel.?];
+    return allocator.dupe(u8, inner);
+}
+
 fn buildIndexHtml(allocator: std.mem.Allocator) ![]u8 {
     const tpl =
         \\<!DOCTYPE html>
@@ -335,18 +462,35 @@ fn buildIndexHtml(allocator: std.mem.Allocator) ![]u8 {
         \\    html, body { margin: 0; padding: 0; height: 100%; }
         \\    .bar { background: #111; color: #eee; padding: 10px 12px; font: 14px system-ui, sans-serif; display:flex; gap:8px; align-items:center }
         \\    .bar input { min-width: 420px; }
-        \\    #frame { border: 0; width: 100%; height: calc(100vh - 46px); }
+        \\    #preview { padding: 12px 16px; }
         \\  </style>
         \\</head>
         \\<body>
         \\  <div class="bar">
         \\    <strong>Docz web-preview</strong>
-        \\    <form id="f" action="/view" method="get" target="frame">
+        \\    <form id="f">
         \\      <input id="p" type="text" name="path" value="docs/SPEC.dcz" />
         \\      <button>Open</button>
         \\    </form>
         \\  </div>
-        \\  <iframe id="frame" name="frame" src="/view?path=docs/SPEC.dcz"></iframe>
+        \\  <div id="preview"></div>
+        \\  <script>
+        \\    const $ = sel => document.querySelector(sel);
+        \\    const input = $('#p');
+        \\    const view = $('#preview');
+        \\    async function load(path) {
+        \\      try {
+        \\        const r = await fetch('/render?path=' + encodeURIComponent(path), { cache: 'no-store' });
+        \\        view.innerHTML = await r.text();
+        \\      } catch (e) {
+        \\        view.innerHTML = '<pre>Render failed: ' + (e && e.message || e) + '</pre>';
+        \\      }
+        \\    }
+        \\    $('#f').addEventListener('submit', (e) => { e.preventDefault(); load(input.value); });
+        \\    // simple periodic refresh; swap to SSE later if desired
+        \\    setInterval(() => load(input.value), 800);
+        \\    load(input.value);
+        \\  </script>
         \\</body>
         \\</html>
     ;

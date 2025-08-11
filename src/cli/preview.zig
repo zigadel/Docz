@@ -5,8 +5,10 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     // Defaults
     var doc_root: []const u8 = ".";
     var port: u16 = 5173;
+    var path: []const u8 = "docs/SPEC.dcz";
+    var have_positional = false;
 
-    // Parse flags: --root/-r, --port/-p, --help/-h
+    // Parse: [<path>] [--root|-r DIR] [--port|-p N] [--help|-h]
     while (it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             return printUsage();
@@ -21,11 +23,17 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
                 std.debug.print("preview: --port requires a value\n", .{});
                 return error.Invalid;
             };
-            const parsed = std.fmt.parseUnsigned(u16, v, 10) catch {
+            port = std.fmt.parseUnsigned(u16, v, 10) catch {
                 std.debug.print("preview: invalid port: {s}\n", .{v});
                 return error.Invalid;
             };
-            port = parsed;
+        } else if (arg.len > 0 and arg[0] != '-') {
+            if (have_positional) {
+                std.debug.print("preview: unknown arg: {s}\n", .{arg});
+                return error.Invalid;
+            }
+            path = arg;
+            have_positional = true;
         } else {
             std.debug.print("preview: unknown arg: {s}\n", .{arg});
             return error.Invalid;
@@ -36,21 +44,42 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     var server = try docz.web_preview.server.PreviewServer.init(alloc, doc_root);
     defer server.deinit();
 
+    // Open the browser (best-effort, non-blocking)
+    try openBrowser(alloc, port, path);
+
+    // Block and serve
     try server.listenAndServe(port);
+}
+
+fn openBrowser(alloc: std.mem.Allocator, port: u16, path: []const u8) !void {
+    const url = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}/view?path={s}", .{ port, path });
+    defer alloc.free(url);
+
+    const os = @import("builtin").os.tag;
+    const argv = switch (os) {
+        .windows => &[_][]const u8{ "cmd", "/c", "start", url },
+        .macos => &[_][]const u8{ "open", url },
+        else => &[_][]const u8{ "xdg-open", url },
+    };
+
+    var child = std.process.Child.init(argv, alloc);
+    _ = child.spawn() catch {}; // best-effort; ignore failures
 }
 
 fn printUsage() void {
     std.debug.print(
-        \\Usage: docz preview [--root <dir>] [--port <num>]
+        \\Usage: docz preview [<path>] [--root <dir>] [--port <num>]
         \\
         \\Options:
-        \\  -r, --root <dir>   Document root to serve   (default: ".")
-        \\  -p, --port <num>   Port to listen on        (default: 5173)
-        \\  -h, --help         Show this help
+        \\  <path>            .dcz to open initially (default: docs/SPEC.dcz)
+        \\  -r, --root <dir>  Document root to serve   (default: ".")
+        \\  -p, --port <num>  Port to listen on        (default: 5173)
+        \\  -h, --help        Show this help
         \\
         \\Examples:
         \\  docz preview
-        \\  docz preview --root docs --port 5173
+        \\  docz preview docs/SPEC.dcz
+        \\  docz preview --root docs --port 8787 docs/guide.dcz
         \\
     , .{});
 }
