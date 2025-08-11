@@ -1,6 +1,16 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+// Link platform-specific networking deps based on the *artifact's* target.
+// Works for native and cross builds.
+fn linkPlatformNetDeps(artifact: *std.Build.Step.Compile) void {
+    const rt = artifact.root_module.resolved_target orelse return;
+    if (rt.result.os.tag == .windows) {
+        // std.net/std.http on Windows needs Winsock
+        artifact.linkSystemLibrary("ws2_32");
+    }
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -98,6 +108,7 @@ pub fn build(b: *std.Build) void {
         .name = "docz",
         .root_module = cli_root_module,
     });
+    linkPlatformNetDeps(exe); // <-- Winsock on Windows
 
     // Normal install (zig build install)
     b.installArtifact(exe);
@@ -106,19 +117,18 @@ pub fn build(b: *std.Build) void {
     const exe_name = if (builtin.os.tag == .windows) "docz.exe" else "docz";
     const e2e_name = if (builtin.os.tag == .windows) "docz-e2e.exe" else "docz-e2e";
 
-    // Install a separate e2e launcher so tests never lock the main binary
+    // Install a separate e2e launcher into bin/ so tests never lock the main binary
     const e2e_install = b.addInstallArtifact(exe, .{
-        .dest_sub_path = e2e_name,
+        .dest_sub_path = b.fmt("bin/{s}", .{e2e_name}),
     });
 
-    // Relative paths (helpful for logs) + Absolute paths (source of truth for tests)
+    // Relative + absolute paths (baked for tests/tools)
     const docz_rel = b.fmt("zig-out/bin/{s}", .{exe_name});
     const e2e_rel = b.fmt("zig-out/bin/{s}", .{e2e_name});
 
     const docz_abs = b.getInstallPath(.bin, exe_name);
     const e2e_abs = b.getInstallPath(.bin, e2e_name);
 
-    // Bake into build options for any code/tests that read them at comptime
     build_opts.addOption([]const u8, "docz_relpath", docz_rel);
     build_opts.addOption([]const u8, "e2e_relpath", e2e_rel);
     build_opts.addOption([]const u8, "docz_abspath", docz_abs);
@@ -134,24 +144,31 @@ pub fn build(b: *std.Build) void {
     // 🧪 Unit tests (docz + each internal converter)
     // ─────────────────────────────────────────────
     const unit_tests = b.addTest(.{ .root_module = docz_module });
+    linkPlatformNetDeps(unit_tests); // safe; needed if tests touch std.net/http
     const unit_run = b.addRunArtifact(unit_tests);
 
     const html_import_unit = b.addTest(.{ .root_module = html_import_mod });
+    linkPlatformNetDeps(html_import_unit);
     const html_import_unit_run = b.addRunArtifact(html_import_unit);
 
     const html_export_unit = b.addTest(.{ .root_module = html_export_mod });
+    linkPlatformNetDeps(html_export_unit);
     const html_export_unit_run = b.addRunArtifact(html_export_unit);
 
     const md_import_unit = b.addTest(.{ .root_module = md_import_mod });
+    linkPlatformNetDeps(md_import_unit);
     const md_import_unit_run = b.addRunArtifact(md_import_unit);
 
     const md_export_unit = b.addTest(.{ .root_module = md_export_mod });
+    linkPlatformNetDeps(md_export_unit);
     const md_export_unit_run = b.addRunArtifact(md_export_unit);
 
     const latex_import_unit = b.addTest(.{ .root_module = latex_import_mod });
+    linkPlatformNetDeps(latex_import_unit);
     const latex_import_unit_run = b.addRunArtifact(latex_import_unit);
 
     const latex_export_unit = b.addTest(.{ .root_module = latex_export_mod });
+    linkPlatformNetDeps(latex_export_unit);
     const latex_export_unit_run = b.addRunArtifact(latex_export_unit);
 
     const unit_step = b.step("test", "Run unit tests");
@@ -213,10 +230,15 @@ pub fn build(b: *std.Build) void {
     cli_enable_mod.addImport("docz", docz_module);
 
     const cli_common_unit = b.addTest(.{ .root_module = cli_common_mod });
+    linkPlatformNetDeps(cli_common_unit);
     const cli_convert_unit = b.addTest(.{ .root_module = cli_convert_mod });
+    linkPlatformNetDeps(cli_convert_unit);
     const cli_build_unit = b.addTest(.{ .root_module = cli_build_mod });
+    linkPlatformNetDeps(cli_build_unit);
     const cli_preview_unit = b.addTest(.{ .root_module = cli_preview_mod });
+    linkPlatformNetDeps(cli_preview_unit);
     const cli_enable_unit = b.addTest(.{ .root_module = cli_enable_mod });
+    linkPlatformNetDeps(cli_enable_unit);
 
     const cli_common_run = b.addRunArtifact(cli_common_unit);
     const cli_convert_run = b.addRunArtifact(cli_convert_unit);
@@ -249,6 +271,7 @@ pub fn build(b: *std.Build) void {
     integration_module.addImport("latex_export", latex_export_mod);
 
     const integration_tests = b.addTest(.{ .root_module = integration_module });
+    linkPlatformNetDeps(integration_tests);
     const integration_run = b.addRunArtifact(integration_tests);
     const integration_step = b.step("test-integration", "Run integration tests");
     integration_step.dependOn(&integration_run.step);
@@ -265,6 +288,7 @@ pub fn build(b: *std.Build) void {
     e2e_module.addOptions("build_options", build_opts);
 
     const e2e_tests = b.addTest(.{ .root_module = e2e_module });
+    linkPlatformNetDeps(e2e_tests);
     const e2e_run = b.addRunArtifact(e2e_tests);
 
     // Give tests an ABSOLUTE path to the e2e launcher and ensure it exists first.
