@@ -1,13 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 
-fn exeName() []const u8 {
-    return if (builtin.os.tag == .windows) "docz.exe" else "docz";
-}
-
-fn e2eExeName() []const u8 {
-    return if (builtin.os.tag == .windows) "docz-e2e.exe" else "docz-e2e";
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Small path helpers (owned results)
+// ─────────────────────────────────────────────────────────────────────────────
 
 fn pathJoin2(alloc: std.mem.Allocator, a: []const u8, b: []const u8) ![]u8 {
     var list = std.ArrayList([]const u8).init(alloc);
@@ -17,73 +14,163 @@ fn pathJoin2(alloc: std.mem.Allocator, a: []const u8, b: []const u8) ![]u8 {
     return std.fs.path.join(alloc, list.items);
 }
 
-/// Build an absolute path to a file under zig-out/bin without requiring it to exist.
-fn binPathAbs(alloc: std.mem.Allocator, name: []const u8) ![]u8 {
+fn pathJoin3(alloc: std.mem.Allocator, a: []const u8, b: []const u8, c: []const u8) ![]u8 {
+    var list = std.ArrayList([]const u8).init(alloc);
+    defer list.deinit();
+    try list.append(a);
+    try list.append(b);
+    try list.append(c);
+    return std.fs.path.join(alloc, list.items);
+}
+
+fn dirExistsAbs(abs_path: []const u8) bool {
+    var d = std.fs.openDirAbsolute(abs_path, .{}) catch return false;
+    d.close();
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Repo/CWD anchor (stable for test runner)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn repoRootFromCwd(alloc: std.mem.Allocator) ![]u8 {
+    return std.fs.cwd().realpathAlloc(alloc, ".");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Launcher discovery (no nested functions)
+// Strategy:
+//   1) Prefer build_options.e2e_abspath (absolute, set by build.zig)
+//   2) Find-up from CWD for zig-out/bin/docz-e2e(.exe)
+//   3) Find-up from CWD for zig-out/bin/docz(.exe)
+//   4) Fallback to build_options.docz_abspath (absolute)
+// Emits strong diagnostics on failure.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn tryOpenAbs(p: []const u8) bool {
+    if (!std.fs.path.isAbsolute(p)) return false;
+    const f = std.fs.openFileAbsolute(p, .{}) catch return false;
+    f.close();
+    return true;
+}
+
+fn findUpFile(
+    alloc: std.mem.Allocator,
+    start_abs: []const u8,
+    rel: []const u8,
+    max_up: usize,
+) !?[]u8 {
+    if (!std.fs.path.isAbsolute(start_abs)) return null;
+
+    var cur = try alloc.dupe(u8, start_abs);
+    defer alloc.free(cur);
+
+    var i: usize = 0;
+    while (true) : (i += 1) {
+        if (i > max_up) break;
+
+        const cand = try std.fs.path.join(alloc, &[_][]const u8{ cur, rel });
+        if (std.fs.openFileAbsolute(cand, .{})) |f| {
+            f.close();
+            return cand; // owned
+        } else |e| {
+            switch (e) {
+                error.FileNotFound => {},
+                else => {},
+            }
+        }
+        alloc.free(cand);
+
+        const parent_opt = std.fs.path.dirname(cur);
+        if (parent_opt == null) break;
+
+        const parent = parent_opt.?;
+        const dup = try alloc.dupe(u8, parent);
+        alloc.free(cur);
+        cur = dup;
+    }
+    return null;
+}
+
+fn ensureE2ELauncher(alloc: std.mem.Allocator) ![]u8 {
+    const e2e_name = if (builtin.os.tag == .windows) "docz-e2e.exe" else "docz-e2e";
+    const docz_name = if (builtin.os.tag == .windows) "docz.exe" else "docz";
+
+    // 1) baked e2e absolute (most reliable)
+    if (@hasDecl(build_options, "e2e_abspath")) {
+        const baked = build_options.e2e_abspath;
+        if (tryOpenAbs(baked)) return try alloc.dupe(u8, baked);
+    }
+
+    // 2) find-up: zig-out/bin/docz-e2e*
     const cwd_abs = try std.fs.cwd().realpathAlloc(alloc, ".");
     defer alloc.free(cwd_abs);
 
-    const rel = try pathJoin2(alloc, "zig-out/bin", name);
-    defer alloc.free(rel);
+    const rel_e2e = try std.fs.path.join(alloc, &[_][]const u8{ "zig-out", "bin", e2e_name });
+    defer alloc.free(rel_e2e);
+    if (try findUpFile(alloc, cwd_abs, rel_e2e, 8)) |hit| return hit;
 
-    return try pathJoin2(alloc, cwd_abs, rel);
-}
+    // 3) find-up: zig-out/bin/docz*  (use docz directly if e2e isn’t present)
+    const rel_docz = try std.fs.path.join(alloc, &[_][]const u8{ "zig-out", "bin", docz_name });
+    defer alloc.free(rel_docz);
+    if (try findUpFile(alloc, cwd_abs, rel_docz, 8)) |hit| return hit;
 
-fn fileExistsAbsolute(path: []const u8) bool {
-    if (std.fs.openFileAbsolute(path, .{})) |f| {
-        f.close();
-        return true;
-    } else |_| {
-        return false;
+    // 4) baked docz absolute
+    if (@hasDecl(build_options, "docz_abspath")) {
+        const baked_docz = build_options.docz_abspath;
+        if (tryOpenAbs(baked_docz)) return try alloc.dupe(u8, baked_docz);
     }
+
+    // diagnostics
+    std.debug.print(
+        "[ensureE2ELauncher] Could not find a runnable CLI.\n" ++
+            "  Tried (in order):\n" ++
+            "    • build_options.e2e_abspath\n" ++
+            "    • find-up from CWD for \"zig-out/bin/{s}\"\n" ++
+            "    • find-up from CWD for \"zig-out/bin/{s}\"\n" ++
+            "    • build_options.docz_abspath\n" ++
+            "  CWD: {s}\n",
+        .{ e2e_name, docz_name, cwd_abs },
+    );
+
+    return error.FileNotFound;
 }
 
-fn copyFileAbs(src_path: []const u8, dst_path: []const u8) !void {
-    var src = try std.fs.openFileAbsolute(src_path, .{});
-    defer src.close();
+// ─────────────────────────────────────────────────────────────────────────────
+// Test workspace helper (under <repo>/zig-out)
+// ─────────────────────────────────────────────────────────────────────────────
 
-    var dst = try std.fs.createFileAbsolute(dst_path, .{ .truncate = true });
-    defer dst.close();
-
-    var buf: [64 * 1024]u8 = undefined;
-    while (true) {
-        const n = try src.read(&buf);
-        if (n == 0) break;
-        try dst.writeAll(buf[0..n]);
-    }
-}
-
-/// Ensure a dedicated launcher (copy of docz) so install step can overwrite docz.exe later on Windows.
-fn ensureE2eLauncher(alloc: std.mem.Allocator) ![]u8 {
-    const e2e = try binPathAbs(alloc, e2eExeName());
-    if (fileExistsAbsolute(e2e)) return e2e;
-
-    const docz = try binPathAbs(alloc, exeName());
-    if (!fileExistsAbsolute(docz)) return error.FileNotFound;
-
-    try copyFileAbs(docz, e2e);
-    return e2e;
-}
-
-/// Create a fresh working directory under zig-out/ and return both an open Dir and its absolute path.
 fn makeWorkDir(alloc: std.mem.Allocator) !struct { dir: std.fs.Dir, abs: []u8 } {
-    try std.fs.cwd().makePath("zig-out");
+    const repo_abs = try repoRootFromCwd(alloc);
+    defer alloc.free(repo_abs);
 
-    var zig_out = try std.fs.cwd().openDir("zig-out", .{ .iterate = false });
-    defer zig_out.close();
+    const base_abs = if (dirExistsAbs(repo_abs))
+        try alloc.dupe(u8, repo_abs)
+    else
+        try std.fs.cwd().realpathAlloc(alloc, ".");
+    defer alloc.free(base_abs);
+
+    var base_dir = try std.fs.openDirAbsolute(base_abs, .{});
+    defer base_dir.close();
+
+    try base_dir.makePath("zig-out");
 
     var name_buf: [64]u8 = undefined;
     const sub = try std.fmt.bufPrint(&name_buf, "e2e_cli_test-{d}", .{std.time.milliTimestamp()});
-    try zig_out.makePath(sub);
+    const sub_rel = try std.fs.path.join(alloc, &[_][]const u8{ "zig-out", sub });
+    defer alloc.free(sub_rel);
 
-    // Get absolute path to zig-out, then build the final absolute work path.
-    const zig_out_abs = try std.fs.cwd().realpathAlloc(alloc, "zig-out");
-    const work_abs = try pathJoin2(alloc, zig_out_abs, sub);
-    alloc.free(zig_out_abs); // <— free on success too
+    try base_dir.makePath(sub_rel);
 
-    const work_dir = try zig_out.openDir(sub, .{ .iterate = false });
+    const abs = try pathJoin3(alloc, base_abs, "zig-out", sub);
+    const dir = try std.fs.openDirAbsolute(abs, .{ .iterate = false });
 
-    return .{ .dir = work_dir, .abs = work_abs };
+    return .{ .dir = dir, .abs = abs };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The actual e2e test
+// ─────────────────────────────────────────────────────────────────────────────
 
 test "e2e: docz convert dcz→tex and tex→dcz" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -97,7 +184,6 @@ test "e2e: docz convert dcz→tex and tex→dcz" {
         \\
     ;
 
-    // workspace
     var work_bundle = try makeWorkDir(A);
     defer {
         work_bundle.dir.close();
@@ -106,7 +192,6 @@ test "e2e: docz convert dcz→tex and tex→dcz" {
     const work = work_bundle.dir;
     const work_abs = work_bundle.abs;
 
-    // Absolute file paths we’ll pass to the child process
     const in_path = try pathJoin2(A, work_abs, "in.dcz");
     defer A.free(in_path);
     const out_path = try pathJoin2(A, work_abs, "out.tex");
@@ -114,29 +199,25 @@ test "e2e: docz convert dcz→tex and tex→dcz" {
     const back_path = try pathJoin2(A, work_abs, "back.dcz");
     defer A.free(back_path);
 
-    // write in.dcz (via the Dir handle; independent of child CWD)
     {
         var f = try work.createFile("in.dcz", .{ .truncate = true });
         defer f.close();
         _ = try f.writeAll(dcz_input);
     }
 
-    const exe_path = try ensureE2eLauncher(A);
+    const exe_path = try ensureE2ELauncher(A);
     defer A.free(exe_path);
 
-    // docz convert <abs in> --to <abs out>
     {
         var child = std.process.Child.init(
             &[_][]const u8{ exe_path, "convert", in_path, "--to", out_path },
             A,
         );
-        // No cwd_dir / cwd dependency anymore
         try child.spawn();
         const term = try child.wait();
         try std.testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, term);
     }
 
-    // read out.tex and sanity-check
     const tex = blk: {
         var f = try work.openFile("out.tex", .{});
         defer f.close();
@@ -147,7 +228,6 @@ test "e2e: docz convert dcz→tex and tex→dcz" {
     try std.testing.expect(std.mem.indexOf(u8, tex, "\\title{T}") != null);
     try std.testing.expect(std.mem.indexOf(u8, tex, "\\section{Hello}") != null);
 
-    // round-trip back: docz convert <abs out.tex> --to <abs back.dcz>
     {
         var child = std.process.Child.init(
             &[_][]const u8{ exe_path, "convert", out_path, "--to", back_path },

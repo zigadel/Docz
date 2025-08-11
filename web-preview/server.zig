@@ -1,5 +1,6 @@
 const std = @import("std");
 const hot = @import("hot_reload.zig");
+const docz = @import("docz");
 
 /// Writes SSE bytes to an in-flight streaming HTTP response.
 const SinkWrap = struct {
@@ -18,8 +19,9 @@ const SinkWrap = struct {
 
 /// Minimal HTTP preview server with:
 /// - Static file serving from `doc_root`
-/// - Index fallback with embedded client that listens to SSE at '/_events'
-/// - SSE endpoint wired to Broadcaster (see hot_reload.zig)
+/// - Index fallback that embeds an iframe to /view?path=docs/SPEC.dcz
+/// - /view?path=... that renders .dcz → HTML via Docz core
+/// - SSE endpoint '/_events' wired to Broadcaster; file mtime poller triggers "reload"
 pub const PreviewServer = struct {
     allocator: std.mem.Allocator,
     doc_root: []const u8,
@@ -49,6 +51,9 @@ pub const PreviewServer = struct {
         try server.listen(.{ .address = try std.net.Address.parseIp4("127.0.0.1", port) });
         std.debug.print("🔎 web-preview listening on http://127.0.0.1:{d}\n", .{port});
 
+        // Watch the default SPEC file for hot-reload; harmless if missing
+        _ = try std.Thread.spawn(.{}, pollFileAndBroadcast, .{ &self.broadcaster, "docs/SPEC.dcz", 250 });
+
         while (true) {
             var conn = try server.accept(.{ .allocator = self.allocator });
             defer conn.deinit();
@@ -63,12 +68,18 @@ pub const PreviewServer = struct {
 
     fn handle(self: *PreviewServer, conn: *std.http.Server.Connection, req: *std.http.Server.Request) !void {
         _ = conn; // silence 'unused parameter'
-
         const path = req.head.target;
 
         // SSE endpoint
-        if (std.mem.eql(u8, path, "/_events")) {
+        if (std.mem.eql(u8, stripQuery(path), "/_events")) {
             return self.handleSSE(req);
+        }
+
+        // Live DCZ render endpoint: /view?path=docs/SPEC.dcz
+        if (std.mem.startsWith(u8, path, "/view")) {
+            const maybe = queryParam(path, "path");
+            const fs_path = maybe orelse "docs/SPEC.dcz";
+            return self.serveRenderedDcz(req, fs_path);
         }
 
         // Static file serving with simple routing and safe path handling
@@ -119,7 +130,7 @@ pub const PreviewServer = struct {
         var wrap = SinkWrap{ .res_ptr = &res };
 
         const id = try self.broadcaster.add(wrap.make());
-        // Send initial hello
+        // Initial hello
         try self.broadcaster.broadcast("hello", "connected");
 
         // Keep alive until client is pruned/removed
@@ -134,6 +145,45 @@ pub const PreviewServer = struct {
     fn serveIndex(self: *PreviewServer, req: *std.http.Server.Request) !void {
         const html = try buildIndexHtml(self.allocator);
         defer self.allocator.free(html);
+
+        return req.respond(.{
+            .status = .ok,
+            .extra_headers = &.{
+                .{ .name = "Content-Type", .value = "text/html; charset=utf-8" },
+                .{ .name = "Cache-Control", .value = "no-cache" },
+            },
+            .body = html,
+        });
+    }
+
+    fn serveRenderedDcz(self: *PreviewServer, req: *std.http.Server.Request, fs_path: []const u8) !void {
+        const A = self.allocator;
+
+        // Read file
+        const input = readFileAlloc(A, fs_path) catch |e| {
+            return req.respond(.{
+                .status = .ok,
+                .extra_headers = &.{
+                    .{ .name = "Content-Type", .value = "text/html; charset=utf-8" },
+                },
+                .body = try std.fmt.allocPrint(A, "<pre>Failed to read {s}: {s}</pre>", .{ fs_path, @errorName(e) }),
+            });
+        };
+        defer A.free(input);
+
+        // DCZ -> tokens -> AST
+        const tokens = try docz.Tokenizer.tokenize(input, A);
+        defer {
+            docz.Tokenizer.freeTokens(A, tokens);
+            A.free(tokens);
+        }
+
+        var ast = try docz.Parser.parse(tokens, A);
+        defer ast.deinit();
+
+        // AST -> HTML (public HTML renderer)
+        const html = try docz.Renderer.renderHTML(&ast, A);
+        defer A.free(html);
 
         return req.respond(.{
             .status = .ok,
@@ -276,6 +326,47 @@ fn mimeFromPath(path: []const u8) []const u8 {
     return "application/octet-stream";
 }
 
+fn stripQuery(p: []const u8) []const u8 {
+    return p[0 .. std.mem.indexOfScalar(u8, p, '?') orelse p.len];
+}
+
+fn queryParam(target: []const u8, key: []const u8) ?[]const u8 {
+    const qpos = std.mem.indexOfScalar(u8, target, '?') orelse return null;
+    var it = std.mem.splitScalar(u8, target[qpos + 1 ..], '&');
+    while (it.next()) |kv| {
+        if (kv.len == 0) continue;
+        const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
+        if (std.mem.eql(u8, kv[0..eq], key)) return kv[eq + 1 ..];
+    }
+    return null;
+}
+
+fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var f = try std.fs.cwd().openFile(path, .{});
+    defer f.close();
+    return try f.readToEndAlloc(allocator, 1 << 26);
+}
+
+// Poll a file and broadcast "reload" on mtime change
+fn pollFileAndBroadcast(b: *hot.Broadcaster, path: []const u8, ms: u64) !void {
+    var last: u64 = 0;
+    while (true) {
+        const mt = fileMtime(path) catch 0;
+        if (mt != 0 and mt != last) {
+            if (last != 0) b.broadcast("reload", path);
+            last = mt;
+        }
+        std.time.sleep(ms * std.time.ns_per_ms);
+    }
+}
+
+fn fileMtime(path: []const u8) !u64 {
+    var f = try std.fs.cwd().openFile(path, .{});
+    defer f.close();
+    const s = try f.stat();
+    return @intCast(s.mtime);
+}
+
 fn buildIndexHtml(allocator: std.mem.Allocator) ![]u8 {
     const tpl =
         \\<!DOCTYPE html>
@@ -285,32 +376,30 @@ fn buildIndexHtml(allocator: std.mem.Allocator) ![]u8 {
         \\  <meta name="viewport" content="width=device-width, initial-scale=1" />
         \\  <title>Docz Web Preview</title>
         \\  <style>
-        \\    html, body { margin: 0; padding: 0; font-family: system-ui, sans-serif; }
-        \\    .bar { background: #111; color: #eee; padding: 10px 12px; font-size: 14px; }
-        \\    .bar b { color: #9ae6b4; }
-        \\    .wrap { padding: 16px; }
+        \\    html, body { margin: 0; padding: 0; height: 100%; }
+        \\    .bar { background: #111; color: #eee; padding: 10px 12px; font: 14px system-ui, sans-serif; display:flex; gap:8px; align-items:center }
+        \\    .bar input { min-width: 420px; }
+        \\    #frame { border: 0; width: 100%; height: calc(100vh - 46px); }
         \\  </style>
         \\</head>
         \\<body>
-        \\  <div class="bar">Docz <b>web-preview</b> — listening for changes…</div>
-        \\  <div class="wrap">
-        \\    <h1>Docz Web Preview</h1>
-        \\    <p>Place your built HTML files in the configured <code>doc_root</code> and visit them directly.</p>
-        \\    <p>The page auto-reloads on changes when your watcher calls <code>broadcast("reload", "...")</code>.</p>
+        \\  <div class="bar">
+        \\    <strong>Docz web-preview</strong>
+        \\    <form id="f" action="/view" method="get" target="frame">
+        \\      <input id="p" type="text" name="path" value="docs/SPEC.dcz" />
+        \\      <button>Open</button>
+        \\    </form>
         \\  </div>
+        \\  <iframe id="frame" name="frame" src="/view?path=docs/SPEC.dcz"></iframe>
         \\  <script>
-        \\    (function(){
-        \\      try {
-        \\        var es = new EventSource('/_events');
-        \\        es.addEventListener('hello', function(){ console.log('[docz] sse hello'); });
-        \\        es.addEventListener('reload', function(ev){
-        \\          console.log('[docz] reload', ev.data);
-        \\          location.reload();
-        \\        });
-        \\        es.onmessage = function(ev){ console.log('[docz] message', ev.data); };
-        \\        es.onerror = function(){ console.warn('[docz] sse error'); };
-        \\      } catch (e) { console.warn('[docz] sse init failed', e); }
-        \\    })();
+        \\    const es = new EventSource('/_events');
+        \\    es.addEventListener('hello', () => console.log('[docz] sse connected'));
+        \\    es.addEventListener('reload', () => {
+        \\      const fr = document.getElementById('frame');
+        \\      const url = new URL(fr.src, location.href);
+        \\      url.searchParams.set('_', Date.now()); // cache-bust
+        \\      fr.src = url.toString();
+        \\    });
         \\  </script>
         \\</body>
         \\</html>
@@ -368,7 +457,7 @@ test "mimeFromPath basics" {
     try std.testing.expectEqualStrings("application/octet-stream", mimeFromPath("x.bin"));
 }
 
-test "buildIndexHtml contains SSE bootstrap" {
+test "buildIndexHtml contains SSE bootstrap and iframe" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(gpa.deinit() == .ok);
     const A = gpa.allocator();
@@ -377,5 +466,6 @@ test "buildIndexHtml contains SSE bootstrap" {
     defer A.free(html);
 
     try std.testing.expect(std.mem.indexOf(u8, html, "EventSource('/_events')") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html, "location.reload()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "iframe") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "/view?path=docs/SPEC.dcz") != null);
 }

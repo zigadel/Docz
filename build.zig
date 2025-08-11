@@ -6,8 +6,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Optional verbosity for tests
-    const verbose_tests =
-        b.option(bool, "verbose-tests", "Print debug logs in tests") orelse false;
+    const verbose_tests = b.option(bool, "verbose-tests", "Print debug logs in tests") orelse false;
 
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "verbose_tests", verbose_tests);
@@ -23,7 +22,7 @@ pub fn build(b: *std.Build) void {
     docz_module.addOptions("build_options", build_opts);
 
     // ─────────────────────────────────────────────
-    // 🖥 CLI module (we'll attach converter imports before creating the exe)
+    // 🖥 CLI module (attach converter imports before creating the exe)
     // ─────────────────────────────────────────────
     const cli_root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -35,7 +34,6 @@ pub fn build(b: *std.Build) void {
 
     // ─────────────────────────────────────────────
     // 🔒 Internal converter modules (not exported via root.zig)
-    //   Each converter imports AST via @import("docz")
     // ─────────────────────────────────────────────
     const html_import_mod = b.createModule(.{
         .root_source_file = b.path("src/convert/html/import.zig"),
@@ -85,7 +83,7 @@ pub fn build(b: *std.Build) void {
     latex_export_mod.addOptions("build_options", build_opts);
     latex_export_mod.addImport("docz", docz_module);
 
-    // Expose converters to the CLI (so main.zig can @import them)
+    // Expose converters to the CLI
     cli_root_module.addImport("html_import", html_import_mod);
     cli_root_module.addImport("html_export", html_export_mod);
     cli_root_module.addImport("md_import", md_import_mod);
@@ -94,22 +92,39 @@ pub fn build(b: *std.Build) void {
     cli_root_module.addImport("latex_export", latex_export_mod);
 
     // ─────────────────────────────────────────────
-    // 🖥 CLI executable (after adding imports)
+    // 🖥 CLI executable
     // ─────────────────────────────────────────────
     const exe = b.addExecutable(.{
         .name = "docz",
         .root_module = cli_root_module,
     });
 
-    // Normal install for users (zig build install)
+    // Normal install (zig build install)
     b.installArtifact(exe);
 
-    // Test-only install: a separate filename so e2e can run without locking docz(.exe)
+    // Names (OS-aware)
+    const exe_name = if (builtin.os.tag == .windows) "docz.exe" else "docz";
     const e2e_name = if (builtin.os.tag == .windows) "docz-e2e.exe" else "docz-e2e";
+
+    // Install a separate e2e launcher so tests never lock the main binary
     const e2e_install = b.addInstallArtifact(exe, .{
-        .dest_sub_path = b.fmt("bin/{s}", .{e2e_name}),
+        .dest_sub_path = e2e_name,
     });
 
+    // Relative paths (helpful for logs) + Absolute paths (source of truth for tests)
+    const docz_rel = b.fmt("zig-out/bin/{s}", .{exe_name});
+    const e2e_rel = b.fmt("zig-out/bin/{s}", .{e2e_name});
+
+    const docz_abs = b.getInstallPath(.bin, exe_name);
+    const e2e_abs = b.getInstallPath(.bin, e2e_name);
+
+    // Bake into build options for any code/tests that read them at comptime
+    build_opts.addOption([]const u8, "docz_relpath", docz_rel);
+    build_opts.addOption([]const u8, "e2e_relpath", e2e_rel);
+    build_opts.addOption([]const u8, "docz_abspath", docz_abs);
+    build_opts.addOption([]const u8, "e2e_abspath", e2e_abs);
+
+    // Convenience run step
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "Run the Docz CLI");
@@ -166,7 +181,6 @@ pub fn build(b: *std.Build) void {
     });
     cli_convert_mod.addOptions("build_options", build_opts);
     cli_convert_mod.addImport("docz", docz_module);
-    // convert.zig depends on internal converters — wire them in:
     cli_convert_mod.addImport("html_import", html_import_mod);
     cli_convert_mod.addImport("html_export", html_export_mod);
     cli_convert_mod.addImport("md_import", md_import_mod);
@@ -198,7 +212,6 @@ pub fn build(b: *std.Build) void {
     cli_enable_mod.addOptions("build_options", build_opts);
     cli_enable_mod.addImport("docz", docz_module);
 
-    // Create test artifacts for each CLI module
     const cli_common_unit = b.addTest(.{ .root_module = cli_common_mod });
     const cli_convert_unit = b.addTest(.{ .root_module = cli_convert_mod });
     const cli_build_unit = b.addTest(.{ .root_module = cli_build_mod });
@@ -228,8 +241,6 @@ pub fn build(b: *std.Build) void {
     });
     integration_module.addImport("docz", docz_module);
     integration_module.addOptions("build_options", build_opts);
-
-    // Provide internal converters to integration tests
     integration_module.addImport("html_import", html_import_mod);
     integration_module.addImport("html_export", html_export_mod);
     integration_module.addImport("md_import", md_import_mod);
@@ -255,12 +266,13 @@ pub fn build(b: *std.Build) void {
 
     const e2e_tests = b.addTest(.{ .root_module = e2e_module });
     const e2e_run = b.addRunArtifact(e2e_tests);
+
+    // Give tests an ABSOLUTE path to the e2e launcher and ensure it exists first.
+    e2e_run.setEnvironmentVariable("DOCZ_BIN", e2e_abs);
+    e2e_run.step.dependOn(&e2e_install.step);
+
     const e2e_step = b.step("test-e2e", "Run end-to-end tests");
     e2e_step.dependOn(&e2e_run.step);
-
-    // IMPORTANT: Depend on the test-only installed artifact,
-    // not the global install step (avoids overwriting a running docz.exe)
-    e2e_step.dependOn(&e2e_install.step);
 
     // ─────────────────────────────────────────────
     // 🔁 Aggregate

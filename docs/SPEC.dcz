@@ -1,0 +1,256 @@
+@meta(title="Docz Mini‑Spec v0", version="0.1.0", status="DRAFT", updated="2025‑08‑10") @end
+@heading(level=1) Docz Mini‑Spec v0 @end
+This is the **single source of truth** for the `.dcz` format for Milestone M0→M1.
+Everything in core (tokenizer, parser, AST, converters, preview, and plugins) MUST conform to this spec.
+Spec changes require tests and MUST be documented here before merge.
+
+@heading(level=2) Scope @end
+This spec defines:
+- Lexical rules (tokens, escaping).
+- Block structure (directives, attributes, nesting).
+- Canonical AST node set and required attributes.
+- Determinism requirements for round‑trips.
+- Validation & sanitization rules (MUST/SHOULD).
+- Diagnostics shape (error categories + spans).
+It also inventories **planned directives**. Unimplemented directives are marked *PLANNED*; validators SHOULD accept them as unknown-by-core but MAY allow via plugins.
+
+@heading(level=2) Lexical Rules @end
+Whitespace is UTF‑8. Lines end with `\n`. The tokenizer recognizes:
+- `@directive` introducer at start of a directive.
+- Parameter list: `(@-separated attributes)` — see “Attributes”.
+- `@end` closes a directive block. **Directives MUST be closed** (no implicit closures).
+- Plain paragraphs are sequences of non-directive lines separated by blank lines.
+- Code and Math are fenced blocks opened by `@code(...)` / `@math(...)` and closed by `@end`.
+- Inline escaping inside blocks uses `@@` to represent a literal `@`.
+- Backslash escapes in text are **NOT** interpreted by Docz (left for exporters), except where noted by converters.
+
+@heading(level=3) Attributes @end
+Attributes are comma‑separated key/value pairs inside `()`:
+@code(language="")
+key="string", key2=123, flag=true
+@end
+Rules:
+- Keys: `[a‑zA‑Z_][a‑zA‑Z0‑9_\-]*`
+- Values: unquoted numbers/booleans OR quoted strings (`"..."`) with `\"` for quotes, `\\` for backslash.
+- Ordering is **not significant**; exporters MAY reorder deterministically (lexicographic by key).
+
+@heading(level=2) Blocks & Directives @end
+A directive has this form:
+@code(language="")
+@name(k1="v1", k2=2, flag=true)
+...block content...
+@end
+@end
+
+@heading(level=3) Core Directives (Implemented) @end
+These MUST be supported by core and round‑trip converters.
+
+@code(language="")
+@meta(...):     Top‑level only. Key/values become document metadata (title, author, version, etc.). No content.
+@heading(...):  Attributes: level=1..6 (required). Content is inline text on same line after closing ')'. No nested blocks.
+@code(...):     Attributes: language="" (optional), execute=false (reserved). Content: raw preformatted until @end.
+@math(...):     Attributes: none (for v0). Content: raw math until @end.
+@image(...):    Attributes: src (required), width/height (optional strings). No content. (Media)
+@import(...):   Attributes: href (required), type? (e.g., stylesheet/script). No content.
+@style(...):    Attributes: freeform. Content is raw (ignored by strict HTML/TeX exporters in v0).
+@end
+@end
+
+@heading(level=3) Extended Directives (PLANNED) @end
+Core validator MUST recognize the spelling and basic shape; deeper semantics may be delegated to plugins.
+Exporters MAY no‑op until implemented.
+@code(language="")
+@style-def(...): Define named style tokens; content contains style rules. (PLANNED)
+@data(...):      Attributes: format=("json"|"yaml"|"csv"|...). Content is raw data. (PLANNED)
+@plot(...):      Attributes: type, x=, y=, etc.; or content as data block. (PLANNED)
+@video(...):     Attributes: src, controls=true|false, poster? (PLANNED)
+@audio(...):     Attributes: src, controls=true|false (PLANNED)
+@pdf(...):       Attributes: src, page? (PLANNED)
+@embed(...):     Attributes: type, source, width?, height? (PLANNED)
+@graph(...):     Attributes: type ("imports"|"links"|...); content lists nodes/edges. (PLANNED)
+@logic(...):     Attributes: none; content is script to be executed in sandbox (WASM/JS). (PLANNED)
+@end
+@end
+
+@heading(level=2) Structural Rules @end
+- Document root is an implicit `Document` node containing a linear list of blocks.
+- `@meta` nodes MUST appear before any body nodes (order preserved). Multiple `@meta` allowed; last write wins per key.
+- `@heading(level=n)` is a block header with inline text on the same line: `@heading(level=2) My Title @end`.
+- `@code` / `@math` / `@data` are multi‑line blocks terminated by `@end`. Content is NOT parsed for nested directives.
+- `@image`, `@import` are leaf nodes (no content block). They MAY appear anywhere in body.
+- Unknown directives: core MUST retain them as `Unknown(name, attributes, raw_block?)` for round‑trip safety.
+- Nesting: v0 forbids nested directives (everything is flat). Future versions MAY allow limited nesting via plugins.
+
+@heading(level=2) Canonical AST (v0) @end
+Core nodes and required attributes:
+@code(language="")
+Document:  children:[Node]
+Meta:      attrs:{string→string} (title, author, version, ...); no content
+Heading:   attrs:{level:string}; content:string (inline text)
+Content:   content:string (paragraph text)
+CodeBlock: attrs:{language?:string, execute?:bool}; content:string (verbatim)
+Math:      content:string (verbatim)
+Media:     attrs:{src:string, kind:"image"|"video"|"audio"|"pdf", width?:string, height?:string}; no content for v0
+Import:    attrs:{href:string, type?:"stylesheet"|"script"}; no content
+Style:     attrs:{...}; content:string (opaque)
+Unknown:   attrs:{...}; name:string; content?:string
+@end
+
+Mapping from directives to AST:
+@code(language="")
+@meta         → Meta
+@heading      → Heading
+(plain text)  → Content (paragraphs; blank-line separated)
+@code         → CodeBlock
+@math         → Math
+@image        → Media(kind="image")
+@video        → Media(kind="video")     (PLANNED → Unknown until implemented)
+@audio        → Media(kind="audio")     (PLANNED → Unknown until implemented)
+@pdf          → Media(kind="pdf")       (PLANNED → Unknown until implemented)
+@import       → Import
+@style        → Style
+(others)      → Unknown(name=..., attrs=..., content?)
+@end
+
+@heading(level=2) Determinism & Round‑Trip @end
+- Converters MUST be deterministic given the same AST and options.
+- Whitespace policy:
+  - Paragraphs normalize trailing whitespace; internal spacing preserved.
+  - Code/Math are preserved verbatim except trimming a trailing `\n\n` may occur during export; importers MUST normalize back.
+- Attribute order in serialized forms MUST be stable (lexicographic by key).
+- Unknown nodes MUST be preserved across `dcz → X → dcz` (opaque pass‑through).
+
+@heading(level=2) Validation Rules (core/validate.zig) @end
+The validator MUST enforce:
+@code(language="")
+[GEN]
+- All directives are closed by @end when required.
+- No nesting in v0 (report error if a directive appears inside a block content).
+- Attributes: keys unique per node; values match expected types.
+
+[META]
+- Only at top of document until first non-Meta node.
+- Keys: any string; recommended: title, author, version, keywords, updated.
+
+[HEADING]
+- level ∈ {1..6}; content non-empty.
+- No trailing spaces inside level attribute value.
+
+[CODE]
+- language: string (may be empty); execute: boolean (default false).
+- Content may be empty (allowed).
+
+[MATH]
+- Content may be empty (validator MAY warn).
+
+[MEDIA]
+- src: non-empty string; width/height if present must be strings (pass-through).
+
+[IMPORT]
+- href: non-empty. type optional: "stylesheet"|"script".
+
+[STYLE]
+- Opaque: always valid; warn if empty.
+@end
+
+Failure categories:
+@code(language="")
+E100: Unexpected EOF (missing @end)
+E110: Unknown directive (if strict mode enabled)
+E120: Disallowed nesting in v0
+E130: Duplicate attribute key
+E140: Invalid attribute type/value
+E150: Meta after body content
+E160: Missing required attribute
+W200: Empty content (Math/Style), allowed but questionable
+@end
+
+@heading(level=2) Sanitization Rules (core/sanitize.zig) @end
+Sanitizer SHOULD:
+@code(language="")
+- Trim trailing whitespace in paragraph lines.
+- Normalize consecutive blank lines to a single blank line.
+- Canonicalize attribute ordering (lexicographic by key).
+- Clamp heading level into [1,6].
+- Remove entirely empty nodes (except CodeBlock — keep empty code).
+@end
+
+@heading(level=2) Diagnostics Shape @end
+CLI MUST be able to print human‑readable and JSON forms. JSON schema (minimal v0):
+@code(language="json")
+{
+  "file": "path/to/doc.dcz",
+  "errors": [
+    {
+      "code": "E160",
+      "message": "Missing required attribute 'level'",
+      "span": { "line": 12, "col": 1, "endLine": 12, "endCol": 20 },
+      "node": "Heading"
+    }
+  ],
+  "warnings": [
+    {
+      "code": "W200",
+      "message": "Empty math block",
+      "span": { "line": 33, "col": 1, "endLine": 35, "endCol": 5 },
+      "node": "Math"
+    }
+  ]
+}
+@end
+
+@heading(level=2) Compliance Checklist (for PRs) @end
+- [ ] SPEC.dcz updated (this file) with any format/behavior change.
+- [ ] Unit tests for tokenizer/parser/validators updated.
+- [ ] Snapshot round‑trip tests updated for md/html/tex.
+- [ ] Deterministic output verified on all three OSes in CI.
+- [ ] Diagnostics include accurate spans and codes.
+
+@heading(level=2) Appendix A: Mini‑Grammar (Informal) @end
+@code(language="")
+Document    := (Meta | Block | Paragraph)*
+Meta        := "@meta(" AttrList? ")" WS "@end" NL
+Heading     := "@heading(" "level=" Int ")" WS InlineText WS "@end" NL
+CodeBlock   := "@code(" AttrList? ")" NL CodeBody "@end" NL
+Math        := "@math(" AttrList? ")" NL MathBody "@end" NL
+Image       := "@image(" AttrList ")" WS "@end" NL
+Import      := "@import(" AttrList ")" WS "@end" NL
+Style       := "@style(" AttrList? ")" NL StyleBody "@end" NL
+Unknown     := "@" Ident "(" AttrList? ")" (NL Body "@end" NL | WS "@end" NL)
+Paragraph   := TextLine+ NL
+
+AttrList    := Attr ("," WS Attr)*
+Attr        := Ident "=" (Number | Bool | String)
+Ident       := [A-Za-z_][A-Za-z0-9_\-]*
+Number      := [0-9]+
+Bool        := "true" | "false"
+String      := "\"" ( [^"\\] | "\\\"" | "\\\\" )* "\""
+InlineText  := (not NL, may contain spaces, supports "@@" for literal "@")
+@end
+
+@heading(level=2) Appendix B: Directive Inventory @end
+This table tracks implementation status for core + planned directives (update as features land).
+@code(language="")
+name        | status     | ast      | exporter/html | exporter/md | exporter/tex
+------------+------------+----------+---------------+-------------+--------------
+meta        | CORE       | Meta     | head/meta     | front-matter| \title/\author
+heading     | CORE       | Heading  | <h1..h6>      | #..######    | \sec/\sub..
+code        | CORE       | CodeBlock| <pre><code>   | ``` ```      | verbatim
+math        | CORE       | Math     | <div class=..>| $$/$$        | equation
+image       | CORE       | Media    | <img>         | ![]()        | \includegraphics
+import      | CORE       | Import   | <link>        | (no-op)      | (no-op)
+style       | CORE       | Style    | (ignored v0)  | (ignored v0) | (ignored v0)
+style-def   | PLANNED    | Style    | (tbd)         | (tbd)        | (tbd)
+data        | PLANNED    | Unknown  | (tbd)         | (tbd)        | (tbd)
+plot        | PLANNED    | Unknown  | (tbd)         | (tbd)        | (tbd)
+video       | PLANNED    | Media    | <video>       | (link)       | (no-op)
+audio       | PLANNED    | Media    | <audio>       | (link)       | (no-op)
+pdf         | PLANNED    | Media    | (embed)       | (link)       | (no-op)
+embed       | PLANNED    | Unknown  | (tbd)         | (tbd)        | (tbd)
+graph       | PLANNED    | Unknown  | (tbd)         | (tbd)        | (tbd)
+logic       | PLANNED    | Unknown  | (tbd)         | (tbd)        | (tbd)
+@end
+
+@heading(level=2) Versioning @end
+- This file’s `version` field tracks spec compatibility.
+- Breaking changes bump MINOR while in v0 (0.x). Once stable, follow SemVer (MAJOR.MINOR.PATCH).
