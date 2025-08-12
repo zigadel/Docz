@@ -6,12 +6,25 @@ const NodeType = @import("ast.zig").NodeType;
 
 /// Maps a directive string (e.g. "@meta") to a NodeType
 fn directiveToNodeType(directive: []const u8) NodeType {
-    return if (std.mem.eql(u8, directive, "@meta")) NodeType.Meta else if (std.mem.eql(u8, directive, "@heading")) NodeType.Heading else if (std.mem.eql(u8, directive, "@code")) NodeType.CodeBlock else if (std.mem.eql(u8, directive, "@math")) NodeType.Math else if (std.mem.eql(u8, directive, "@image")) NodeType.Media else if (std.mem.eql(u8, directive, "@import")) NodeType.Import else if (std.mem.eql(u8, directive, "@style")) NodeType.Style else NodeType.Content;
+    if (std.mem.eql(u8, directive, "@meta")) return NodeType.Meta;
+    if (std.mem.eql(u8, directive, "@heading")) return NodeType.Heading;
+    if (std.mem.eql(u8, directive, "@code")) return NodeType.CodeBlock;
+    if (std.mem.eql(u8, directive, "@math")) return NodeType.Math;
+    if (std.mem.eql(u8, directive, "@image")) return NodeType.Media;
+    if (std.mem.eql(u8, directive, "@import")) return NodeType.Import;
+    if (std.mem.eql(u8, directive, "@style")) return NodeType.Style;
+
+    // NEW:
+    if (std.mem.eql(u8, directive, "@css")) return NodeType.Css;
+    if (std.mem.eql(u8, directive, "@style-def")) return NodeType.StyleDef;
+
+    // Fallback: treat as paragraph-ish content (unknown-by-core can be upgraded later)
+    return NodeType.Content;
 }
 
 fn isBlockDirective(nt: NodeType) bool {
     return switch (nt) {
-        .CodeBlock, .Math, .Style => true,
+        .CodeBlock, .Math, .Style, .Css, .StyleDef => true, // NEW: Css, StyleDef
         else => false,
     };
 }

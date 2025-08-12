@@ -5,6 +5,7 @@ const hot = @import("hot_reload.zig");
 const Tokenizer = @import("../src/parser/tokenizer.zig");
 const Parser = @import("../src/parser/parser.zig");
 const Renderer = @import("../src/renderer/html.zig");
+const HtmlExport = @import("html_export");
 
 /// Writes SSE bytes to an in-flight streaming HTTP response (currently unused).
 const SinkWrap = struct {
@@ -215,7 +216,7 @@ pub const PreviewServer = struct {
         std.debug.print("  parse ok ({d} nodes, {d}ms)\n", .{ ast.children.items.len, std.time.milliTimestamp() - t2 });
 
         const t3 = std.time.milliTimestamp();
-        const html = try Renderer.renderHTML(&ast, A);
+        const html = try HtmlExport.exportHtml(&ast, A);
         defer A.free(html);
         std.debug.print("  render ok ({d} bytes, {d}ms)\n", .{ html.len, std.time.milliTimestamp() - t3 });
 
@@ -458,39 +459,21 @@ fn buildIndexHtml(allocator: std.mem.Allocator) ![]u8 {
         \\  <meta charset="UTF-8" />
         \\  <meta name="viewport" content="width=device-width, initial-scale=1" />
         \\  <title>Docz Web Preview</title>
-        \\  <style>
-        \\    html, body { margin: 0; padding: 0; height: 100%; }
-        \\    .bar { background: #111; color: #eee; padding: 10px 12px; font: 14px system-ui, sans-serif; display:flex; gap:8px; align-items:center }
-        \\    .bar input { min-width: 420px; }
-        \\    #preview { padding: 12px 16px; }
-        \\  </style>
+        \\  <script>
+        \\    (function () {
+        \\      // Allow ?path=... override; default to docs/SPEC.dcz
+        \\      const qs = new URLSearchParams(location.search);
+        \\      const path = qs.get('path') || 'docs/SPEC.dcz';
+        \\      const url = '/view?path=' + encodeURIComponent(path);
+        \\      // Use replace() so Back button doesn’t bounce through the index shell
+        \\      location.replace(url);
+        \\    })();
+        \\  </script>
         \\</head>
         \\<body>
-        \\  <div class="bar">
-        \\    <strong>Docz web-preview</strong>
-        \\    <form id="f">
-        \\      <input id="p" type="text" name="path" value="docs/SPEC.dcz" />
-        \\      <button>Open</button>
-        \\    </form>
-        \\  </div>
-        \\  <div id="preview"></div>
-        \\  <script>
-        \\    const $ = sel => document.querySelector(sel);
-        \\    const input = $('#p');
-        \\    const view = $('#preview');
-        \\    async function load(path) {
-        \\      try {
-        \\        const r = await fetch('/render?path=' + encodeURIComponent(path), { cache: 'no-store' });
-        \\        view.innerHTML = await r.text();
-        \\      } catch (e) {
-        \\        view.innerHTML = '<pre>Render failed: ' + (e && e.message || e) + '</pre>';
-        \\      }
-        \\    }
-        \\    $('#f').addEventListener('submit', (e) => { e.preventDefault(); load(input.value); });
-        \\    // simple periodic refresh; swap to SSE later if desired
-        \\    setInterval(() => load(input.value), 800);
-        \\    load(input.value);
-        \\  </script>
+        \\  <noscript>
+        \\    <p>Preview requires JS to redirect. Open <code>/view?path=docs/SPEC.dcz</code>.</p>
+        \\  </noscript>
         \\</body>
         \\</html>
     ;

@@ -61,6 +61,7 @@ pub fn build(b: *std.Build) void {
     });
     html_export_mod.addOptions("build_options", build_opts);
     html_export_mod.addImport("docz", docz_module);
+    docz_module.addImport("html_export", html_export_mod);
 
     const md_import_mod = b.createModule(.{
         .root_source_file = b.path("src/convert/markdown/import.zig"),
