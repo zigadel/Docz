@@ -5,12 +5,15 @@ const cli_convert = @import("cli/convert.zig");
 const cli_build_cmd = @import("cli/build_cmd.zig");
 const cli_preview = @import("cli/preview.zig");
 const cli_enable = @import("cli/enable_wasm.zig");
+const cli_run = @import("cli/run.zig"); // ← new
 
-/// Global constant for CLI usage text (keeps original lines; adds convert/export)
+/// Global constant for CLI usage text (keeps original lines; adds convert/export + run)
 pub const USAGE_TEXT =
     \\Docz CLI Usage:
     \\  docz build <file.dcz>       Build .dcz file to HTML
     \\  docz preview                Start local preview server
+    \\  docz run <file.dcz>         Convert to temp dir and serve; rebuild on change
+    \\                               Options: [--port <num>] [--css inline|file] [--no-pretty]
     \\  docz enable wasm            Enable WASM execution support
     \\  docz convert <input.{dcz|md|html|htm|tex}> [--to|-t <output.{dcz|md|html|tex}>]
     \\  docz export  <input.{dcz|md|html|htm|tex}> [--to|-t <output.{dcz|md|html|tex}>]
@@ -39,6 +42,10 @@ pub fn main() !void {
     }
     if (std.mem.eql(u8, cmd, "preview")) {
         try cli_preview.run(A, &it);
+        return;
+    }
+    if (std.mem.eql(u8, cmd, "run")) {
+        try cli_run.run(A, &it);
         return;
     }
     if (std.mem.eql(u8, cmd, "enable")) {

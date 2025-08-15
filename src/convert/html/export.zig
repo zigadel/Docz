@@ -113,9 +113,9 @@ fn buildStyleAliases(doc: *const ASTNode, allocator: std.mem.Allocator) !std.Str
             // Insert/replace into `out` (duplicate to make ownership explicit).
             const gop = try out.getOrPut(try allocator.dupe(u8, alias));
             if (gop.found_existing) {
-                // We just allocated a new key for probing; free it, keep existing key.
+                // Free the newly allocated probe key; keep existing key
                 allocator.free(gop.key_ptr.*);
-                // Replace value.
+                // Replace value
                 allocator.free(gop.value_ptr.*);
                 gop.value_ptr.* = try allocator.dupe(u8, classes);
             } else {
@@ -285,6 +285,73 @@ fn writeBodyFromAst(root: *const ASTNode, w: anytype, aliases: *const std.String
             },
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Public helpers for CLI (CSS externalization path)
+// ─────────────────────────────────────────────────────────────
+
+/// Collect the concatenated contents of all Css nodes in document order.
+/// Returns a newly-allocated buffer (caller frees).
+pub fn collectInlineCss(root: *const ASTNode, allocator: std.mem.Allocator) ![]u8 {
+    var buf = std.ArrayList(u8).init(allocator);
+    errdefer buf.deinit();
+
+    for (root.children.items) |node| {
+        if (node.node_type != .Css) continue;
+        if (node.content.len != 0) {
+            try buf.appendSlice(node.content);
+            try buf.append('\n');
+        }
+    }
+    return buf.toOwnedSlice();
+}
+
+/// Remove the *first* <style ...>...</style> block from `html`.
+/// If none found, returns a duplicate of `html`.
+/// Robust to attributes on <style>, e.g. <style media="all">.
+pub fn stripFirstStyleBlock(html: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    const open_tag_needle = "<style";
+    const close_tag_needle = "</style>";
+
+    const open_idx_opt = std.mem.indexOf(u8, html, open_tag_needle);
+    if (open_idx_opt == null) {
+        // nothing to strip; return a copy
+        return try allocator.dupe(u8, html);
+    }
+    const open_idx = open_idx_opt.?;
+
+    // find end of opening tag '>'
+    const gt_idx_opt = std.mem.indexOfScalarPos(u8, html, open_idx, '>');
+    if (gt_idx_opt == null) {
+        // malformed; be conservative and return original
+        return try allocator.dupe(u8, html);
+    }
+    const open_gt = gt_idx_opt.? + 1; // first byte after '>'
+
+    // find the corresponding closing tag
+    const close_idx_opt = std.mem.indexOfPos(u8, html, open_gt, close_tag_needle);
+    if (close_idx_opt == null) {
+        // malformed; return original
+        return try allocator.dupe(u8, html);
+    }
+    const close_idx = close_idx_opt.?;
+    const close_end = close_idx + close_tag_needle.len;
+
+    // Build result = html[0..open_idx] ++ html[close_end..]
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+
+    try out.appendSlice(html[0..open_idx]);
+
+    // Optionally trim one trailing newline right before <style> to keep tidy formatting.
+    if (out.items.len > 0 and out.items[out.items.len - 1] == '\n') {
+        _ = out.pop();
+    }
+
+    try out.appendSlice(html[close_end..]);
+
+    return out.toOwnedSlice();
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -467,4 +534,49 @@ test "html_export: head assets stay in <head>, not body" {
 
     // Import should be present in head as a link.
     try std.testing.expect(std.mem.indexOf(u8, html, "<link rel=\"stylesheet\" href=\"/a.css\">") != null);
+}
+
+test "collectInlineCss joins Css nodes" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    var root = ASTNode.init(A, NodeType.Document);
+    defer root.deinit();
+
+    var c1 = ASTNode.init(A, NodeType.Css);
+    c1.content = "a{color:red}";
+    try root.children.append(c1);
+
+    var c2 = ASTNode.init(A, NodeType.Css);
+    c2.content = "b{font-weight:bold}";
+    try root.children.append(c2);
+
+    const css = try collectInlineCss(&root, A);
+    defer A.free(css);
+
+    try std.testing.expect(std.mem.indexOf(u8, css, "a{color:red}\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, css, "b{font-weight:bold}\n") != null);
+}
+
+test "stripFirstStyleBlock removes the first <style>...</style>" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    const html =
+        \\<head>
+        \\<style>
+        \\body{margin:0}
+        \\</style>
+        \\<style id="second">h1{font-weight:700}</style>
+        \\</head>
+    ;
+    const out = try stripFirstStyleBlock(html, A);
+    defer A.free(out);
+
+    // first style removed
+    try std.testing.expect(std.mem.indexOf(u8, out, "body{margin:0}") == null);
+    // second remains
+    try std.testing.expect(std.mem.indexOf(u8, out, "h1{font-weight:700}") != null);
 }
