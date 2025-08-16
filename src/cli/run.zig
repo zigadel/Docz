@@ -2,10 +2,7 @@ const std = @import("std");
 const docz = @import("docz");
 
 const html_export = @import("html_export");
-const md_import = @import("md_import");
-const html_import = @import("html_import");
-const latex_import = @import("latex_import");
-const latex_export = @import("latex_export");
+// (md/html/tex import/export are available elsewhere; not needed here)
 
 const Kind = enum { dcz, md, html, tex };
 
@@ -35,16 +32,6 @@ fn writeFile(path: []const u8, data: []const u8) !void {
     try f.writeAll(data);
 }
 
-fn replaceExt(alloc: std.mem.Allocator, path: []const u8, new_ext_with_dot: []const u8) ![]u8 {
-    const dir = std.fs.path.dirname(path);
-    const stem = std.fs.path.stem(path);
-    if (dir) |d| {
-        return try std.fmt.allocPrint(alloc, "{s}{c}{s}{s}", .{ d, std.fs.path.sep, stem, new_ext_with_dot });
-    } else {
-        return try std.fmt.allocPrint(alloc, "{s}{s}", .{ stem, new_ext_with_dot });
-    }
-}
-
 fn insertCssLinkBeforeHeadClose(alloc: std.mem.Allocator, html: []const u8, href: []const u8) ![]u8 {
     const needle = "</head>";
     const idx_opt = std.mem.indexOf(u8, html, needle);
@@ -64,6 +51,7 @@ fn insertCssLinkBeforeHeadClose(alloc: std.mem.Allocator, html: []const u8, href
     return out.toOwnedSlice();
 }
 
+// --- tiny pretty printer (unchanged) ---
 fn prettyHtml(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
     var out = std.ArrayList(u8).init(alloc);
     errdefer out.deinit();
@@ -133,11 +121,73 @@ fn prettyHtml(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
     return out.toOwnedSlice();
 }
 
+// --------- Live reload helpers (poll file) ---------
+
+const LIVE_MARKER = "__docz_hot.txt";
+
+fn writeHotMarker(alloc: std.mem.Allocator, out_dir: []const u8) !void {
+    const path = try std.fs.path.join(alloc, &.{ out_dir, LIVE_MARKER });
+    defer alloc.free(path);
+
+    // Hash the i128 timestamp to a u64 seed (portable across Zig versions)
+    const t: i128 = std.time.nanoTimestamp();
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(std.mem.asBytes(&t));
+    const seed: u64 = hasher.final();
+
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random().int(u64);
+
+    const payload = try std.fmt.allocPrint(alloc, "{d}-{x}\n", .{ std.time.milliTimestamp(), r });
+    defer alloc.free(payload);
+
+    try writeFile(path, payload);
+}
+
+fn injectLiveScript(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
+    const script =
+        \\<script>
+        \\(function(){
+        \\  var URL = "__DOCZ_HOT__";
+        \\  var last = null;
+        \\  function tick(){
+        \\    fetch(URL, {cache: 'no-store'}).then(function(r){return r.text()}).then(function(t){
+        \\      if (last === null) last = t;
+        \\      else if (t !== last) location.reload();
+        \\    }).catch(function(_){}).finally(function(){ setTimeout(tick, 500); });
+        \\  }
+        \\  tick();
+        \\})();
+        \\</script>
+        \\
+    ;
+
+    const idx_opt = std.mem.indexOf(u8, html, "</body>");
+    const tag = try std.fmt.allocPrint(alloc, "{s}", .{script});
+    defer alloc.free(tag);
+
+    const with_url = try std.mem.replaceOwned(u8, alloc, tag, "__DOCZ_HOT__", LIVE_MARKER);
+    errdefer alloc.free(with_url);
+
+    if (idx_opt) |idx| {
+        var out = std.ArrayList(u8).init(alloc);
+        errdefer out.deinit();
+        try out.appendSlice(html[0..idx]);
+        try out.appendSlice(with_url);
+        try out.appendSlice(html[idx..]);
+        return out.toOwnedSlice();
+    }
+
+    // Fallback: append at end if no </body>
+    return std.fmt.allocPrint(alloc, "{s}\n{s}", .{ html, with_url });
+}
+
 const CssMode = enum { inline_css, file };
 
 const GenerateOpts = struct {
     css_mode: CssMode = .inline_css,
     pretty: bool = true,
+    live_reload: bool = true,
     css_file_name: []const u8 = "docz.css",
 };
 
@@ -153,6 +203,7 @@ fn generateOnce(
     const kind = detectKindFromPath(dcz_path) orelse return error.Unsupported;
     if (kind != .dcz) return error.ExpectedDcz;
 
+    // DCZ -> AST
     const tokens = try docz.Tokenizer.tokenize(input, alloc);
     defer {
         docz.Tokenizer.freeTokens(alloc, tokens);
@@ -161,6 +212,7 @@ fn generateOnce(
     var ast = try docz.Parser.parse(tokens, alloc);
     defer ast.deinit();
 
+    // HTML with inline <style>
     const html_inline = try html_export.exportHtml(&ast, alloc);
     errdefer alloc.free(html_inline);
 
@@ -183,6 +235,12 @@ fn generateOnce(
         final_html = linked;
     }
 
+    if (opts.live_reload) {
+        const with_live = try injectLiveScript(alloc, final_html);
+        alloc.free(final_html);
+        final_html = with_live;
+    }
+
     if (opts.pretty) {
         const pretty = try prettyHtml(alloc, final_html);
         alloc.free(final_html);
@@ -194,6 +252,9 @@ fn generateOnce(
 
     try writeFile(html_out, final_html);
     alloc.free(final_html);
+
+    // Update hot marker last (so the browser only reloads when the new HTML is fully written)
+    if (opts.live_reload) try writeHotMarker(alloc, out_dir);
 }
 
 fn fileMTime(path: []const u8) !i128 {
@@ -216,7 +277,8 @@ fn spawnPreview(alloc: std.mem.Allocator, root_dir: []const u8, port: u16) !std.
     const port_str = try std.fmt.allocPrint(alloc, "{}", .{port});
     defer alloc.free(port_str);
     try argv.append(port_str);
-    // NOTE: do NOT append "index.html" here
+    // prevent preview from opening its own tab (run opens the correct one)
+    try argv.append("--no-open");
 
     var child = std.process.Child.init(argv.items, alloc);
     child.stdin_behavior = .Ignore;
@@ -227,12 +289,27 @@ fn spawnPreview(alloc: std.mem.Allocator, root_dir: []const u8, port: u16) !std.
     return child;
 }
 
+fn openBrowserToIndex(alloc: std.mem.Allocator, port: u16) !void {
+    const url = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}/index.html", .{port});
+    defer alloc.free(url);
+
+    const os = @import("builtin").os.tag;
+    const argv = switch (os) {
+        .windows => &[_][]const u8{ "cmd", "/c", "start", url },
+        .macos => &[_][]const u8{ "open", url },
+        else => &[_][]const u8{ "xdg-open", url },
+    };
+
+    var child = std.process.Child.init(argv, alloc);
+    _ = child.spawn() catch {};
+}
+
 pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     const usage =
-        \\Usage: docz run <path.dcz> [--port <num>] [--css inline|file] [--no-pretty]
+        \\Usage: docz run <path.dcz> [--port <num>] [--css inline|file] [--no-pretty] [--no-live]
         \\Notes:
-        \\  - Writes to a temp out dir and serves it via `docz preview`
-        \\  - Rebuilds on file change. Refresh the browser to see updates.
+        \\  - Compiles to a temp dir and serves it via `docz preview`
+        \\  - Rebuilds + auto-reloads the browser when the .dcz changes
         \\
     ;
 
@@ -244,6 +321,7 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     var port: u16 = 5173;
     var css_mode: CssMode = .inline_css;
     var pretty: bool = true;
+    var live_reload: bool = true;
 
     while (it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port")) {
@@ -266,26 +344,42 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
             }
         } else if (std.mem.eql(u8, arg, "--no-pretty")) {
             pretty = false;
+        } else if (std.mem.eql(u8, arg, "--no-live")) {
+            live_reload = false;
         } else {
             std.debug.print("run: unknown arg: {s}\n", .{arg});
             return error.Invalid;
         }
     }
 
+    // temp out dir inside zig-cache (portable & disposable)
     const tmp_root = try std.fs.path.join(alloc, &.{ ".zig-cache", "docz-run" });
     defer alloc.free(tmp_root);
     try std.fs.cwd().makePath(tmp_root);
 
-    try generateOnce(alloc, dcz_path, tmp_root, .{ .css_mode = css_mode, .pretty = pretty });
+    // initial build
+    try generateOnce(alloc, dcz_path, tmp_root, .{
+        .css_mode = css_mode,
+        .pretty = pretty,
+        .live_reload = live_reload,
+    });
 
+    // start preview server
     var preview = try spawnPreview(alloc, tmp_root, port);
     defer {
         _ = preview.kill() catch {};
         _ = preview.wait() catch {};
     }
 
-    std.debug.print("Serving on http://localhost:{d}  (dir: {s})\n", .{ port, tmp_root });
+    // open browser directly to the compiled HTML
+    openBrowserToIndex(alloc, port) catch {};
 
+    std.debug.print(
+        "Serving on http://127.0.0.1:{d}  (dir: {s})  [live={any}]\n",
+        .{ port, tmp_root, live_reload },
+    );
+
+    // watch loop (poll .dcz mtime)
     var last = try fileMTime(dcz_path);
     while (true) {
         std.Thread.sleep(250 * std.time.ns_per_ms);
@@ -293,7 +387,11 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
         const now = fileMTime(dcz_path) catch continue;
         if (now != last) {
             last = now;
-            generateOnce(alloc, dcz_path, tmp_root, .{ .css_mode = css_mode, .pretty = pretty }) catch |e| {
+            generateOnce(alloc, dcz_path, tmp_root, .{
+                .css_mode = css_mode,
+                .pretty = pretty,
+                .live_reload = live_reload,
+            }) catch |e| {
                 std.debug.print("run: rebuild failed: {s}\n", .{@errorName(e)});
             };
         }

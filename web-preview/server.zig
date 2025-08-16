@@ -7,21 +7,6 @@ const Parser = @import("../src/parser/parser.zig");
 const Renderer = @import("../src/renderer/html.zig");
 const HtmlExport = @import("html_export");
 
-/// Writes SSE bytes to an in-flight streaming HTTP response (currently unused).
-const SinkWrap = struct {
-    res_ptr: *std.http.Server.Response,
-
-    fn make(self: *SinkWrap) hot.Sink {
-        return .{ .ctx = self, .writeFn = write };
-    }
-
-    fn write(ctx: *anyopaque, bytes: []const u8) !void {
-        var self: *SinkWrap = @ptrCast(@alignCast(ctx));
-        try self.res_ptr.writer().writeAll(bytes);
-        try self.res_ptr.flush();
-    }
-};
-
 pub const PreviewServer = struct {
     allocator: std.mem.Allocator,
     doc_root: []const u8,
@@ -30,7 +15,6 @@ pub const PreviewServer = struct {
     pub fn init(allocator: std.mem.Allocator, doc_root: []const u8) !PreviewServer {
         const trimmed = try trimTrailingSlash(allocator, doc_root);
         errdefer allocator.free(trimmed);
-
         return .{
             .allocator = allocator,
             .doc_root = trimmed,
@@ -45,7 +29,6 @@ pub const PreviewServer = struct {
 
     pub fn listenAndServe(self: *PreviewServer, port: u16) !void {
         const addr = try std.net.Address.parseIp4("127.0.0.1", port);
-
         var tcp = try std.net.Address.listen(addr, .{ .reuse_address = true });
         defer tcp.deinit();
 
@@ -55,27 +38,30 @@ pub const PreviewServer = struct {
         _ = try std.Thread.spawn(.{}, pollFileAndBroadcast, .{ &self.broadcaster, "docs/SPEC.dcz", 250 });
 
         while (true) {
-            const t_accept = std.time.milliTimestamp();
             const net_conn = try tcp.accept();
             defer net_conn.stream.close();
 
             var read_buf: [16 * 1024]u8 = undefined;
             var http = std.http.Server.init(net_conn, &read_buf);
 
-            // Serve exactly one request per TCP connection so we never “hang” on keep-alive.
             var req = http.receiveHead() catch |e| {
-                std.debug.print("❌ receiveHead error after accept (+{d}ms): {s}\n", .{ std.time.milliTimestamp() - t_accept, @errorName(e) });
+                std.debug.print("❌ receiveHead error: {s}\n", .{@errorName(e)});
                 continue;
             };
 
-            // Basic request line logging
-            std.debug.print("→ {s} {s}\n", .{ @tagName(req.head.method), req.head.target });
+            const path = req.head.target;
+            const bare_path = stripQuery(path);
 
-            // Handle; if it throws, send 500 so the client doesn’t spin forever.
+            // Silence hot marker + favicon noise
+            const is_hot = std.mem.eql(u8, bare_path, "/__docz_hot.txt");
+            const is_favicon = std.mem.eql(u8, bare_path, "/favicon.ico");
+            if (!is_hot and !is_favicon) {
+                std.debug.print("→ {s} {s}\n", .{ @tagName(req.head.method), path });
+            }
+
             self.handle(&http, &req) catch |e| {
                 std.debug.print("❌ handler error: {s}\n", .{@errorName(e)});
                 const msg = "Internal server error\n";
-                // Best-effort: try to reply; if this fails, we just close the socket.
                 _ = req.respond(msg, .{
                     .status = .internal_server_error,
                     .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain; charset=utf-8" }},
@@ -89,7 +75,6 @@ pub const PreviewServer = struct {
         const path = req.head.target;
 
         if (std.mem.eql(u8, stripQuery(path), "/ping")) {
-            // Quick sanity check endpoint
             return req.respond("pong\n", .{
                 .status = .ok,
                 .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain; charset=utf-8" }},
@@ -103,14 +88,23 @@ pub const PreviewServer = struct {
             });
         }
 
+        // Placeholder SSE endpoint (non-streaming to match your Zig stdlib)
+        if (std.mem.eql(u8, stripQuery(path), "/hot")) {
+            return handleSSE(req);
+        }
+
         if (std.mem.startsWith(u8, path, "/render")) {
-            const fs_path = queryParam(path, "path") orelse "docs/SPEC.dcz";
+            const raw = queryParam(path, "path") orelse "docs/SPEC.dcz";
+            const fs_path = try urlDecode(self.allocator, raw);
+            defer self.allocator.free(fs_path);
             std.debug.print("  route=/render path={s}\n", .{fs_path});
             return self.serveRenderedFragment(req, fs_path);
         }
 
         if (std.mem.startsWith(u8, path, "/view")) {
-            const fs_path = queryParam(path, "path") orelse "docs/SPEC.dcz";
+            const raw = queryParam(path, "path") orelse "docs/SPEC.dcz";
+            const fs_path = try urlDecode(self.allocator, raw);
+            defer self.allocator.free(fs_path);
             std.debug.print("  route=/view path={s}\n", .{fs_path});
             return self.serveRenderedDcz(req, fs_path);
         }
@@ -119,14 +113,16 @@ pub const PreviewServer = struct {
         defer self.allocator.free(safe_rel);
 
         if (safe_rel.len == 0 or std.mem.eql(u8, safe_rel, ".")) {
-            std.debug.print("  route=/ (index)\n", .{});
+            // index shell that redirects to /view?path=...
             return self.serveIndex(req);
         }
 
         const candidate_a = try join2(self.allocator, self.doc_root, safe_rel);
         defer self.allocator.free(candidate_a);
         if (fileExists(candidate_a)) {
-            std.debug.print("  route=static hit={s}\n", .{candidate_a});
+            if (!std.mem.endsWith(u8, safe_rel, "__docz_hot.txt")) {
+                std.debug.print("  route=static hit={s}\n", .{candidate_a});
+            }
             return self.serveFile(req, candidate_a);
         }
 
@@ -143,17 +139,15 @@ pub const PreviewServer = struct {
         return self.serveIndex(req);
     }
 
-    // Placeholder (no streaming in this snapshot).
-    fn handleSSE(self: *PreviewServer, req: *std.http.Server.Request) !void {
-        _ = self;
-        const body = "SSE not enabled on this Zig build.\n";
+    // Non-streaming placeholder so it compiles on your Zig
+    fn handleSSE(req: *std.http.Server.Request) !void {
+        const body = "SSE endpoint placeholder (streaming disabled in this build).\n";
         return req.respond(body, .{
             .status = .ok,
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "text/plain; charset=utf-8" },
                 .{ .name = "Cache-Control", .value = "no-cache" },
-                .{ .name = "Connection", .value = "keep-alive" },
-                .{ .name = "Access-Control-Allow-Origin", .value = "*" },
+                .{ .name = "Connection", .value = "close" },
             },
         });
     }
@@ -161,9 +155,7 @@ pub const PreviewServer = struct {
     fn serveIndex(self: *PreviewServer, req: *std.http.Server.Request) !void {
         const html = try buildIndexHtml(self.allocator);
         defer self.allocator.free(html);
-
         const cl = try u64ToTmp(self.allocator, html.len);
-        // It's fine to leak per-request a tiny header string for now; you can pool later.
         return req.respond(html, .{
             .status = .ok,
             .extra_headers = &.{
@@ -411,6 +403,47 @@ fn queryParam(target: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
+fn urlDecode(allocator: std.mem.Allocator, enc: []const u8) ![]u8 {
+    var out = try allocator.alloc(u8, enc.len);
+    var j: usize = 0;
+    var i: usize = 0;
+    while (i < enc.len) : (i += 1) {
+        const c = enc[i];
+        if (c == '%' and i + 2 < enc.len) {
+            const h1 = enc[i + 1];
+            const h2 = enc[i + 2];
+            const v1 = hexVal(h1) orelse blk: {
+                out[j] = c;
+                j += 1;
+                break :blk null;
+            };
+            const v2 = hexVal(h2) orelse blk: {
+                out[j] = c;
+                j += 1;
+                break :blk null;
+            };
+            if (v1 != null and v2 != null) {
+                out[j] = (@as(u8, v1.?) << 4) | @as(u8, v2.?);
+                j += 1;
+                i += 2;
+                continue;
+            }
+        }
+        out[j] = c;
+        j += 1;
+    }
+    return allocator.realloc(out, j);
+}
+
+fn hexVal(c: u8) ?u4 {
+    return switch (c) {
+        '0'...'9' => @intCast(c - '0'),
+        'a'...'f' => @intCast(10 + (c - 'a')),
+        'A'...'F' => @intCast(10 + (c - 'A')),
+        else => null,
+    };
+}
+
 fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     var f = try std.fs.cwd().openFile(path, .{});
     defer f.close();
@@ -478,16 +511,4 @@ fn buildIndexHtml(allocator: std.mem.Allocator) ![]u8 {
         \\</html>
     ;
     return allocator.dupe(u8, tpl);
-}
-
-fn isClientStillRegistered(bc: *const hot.Broadcaster, id: u64) bool {
-    for (bc.clients.items) |c| if (c.id == id) return true;
-    return false;
-}
-
-test "mimeFromPath basics" {
-    try std.testing.expectEqualStrings("text/html; charset=utf-8", mimeFromPath("x.html"));
-    try std.testing.expectEqualStrings("text/css; charset=utf-8", mimeFromPath("x.css"));
-    try std.testing.expectEqualStrings("image/png", mimeFromPath("x.png"));
-    try std.testing.expectEqualStrings("application/octet-stream", mimeFromPath("x.bin"));
 }

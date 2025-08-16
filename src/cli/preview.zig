@@ -7,8 +7,9 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     var port: u16 = 5173;
     var path: []const u8 = "docs/SPEC.dcz";
     var have_positional = false;
+    var open_browser: bool = true;
 
-    // Parse: [<path>] [--root|-r DIR] [--port|-p N] [--help|-h]
+    // Parse: [<path>] [--root|-r DIR] [--port|-p N] [--no-open] [--help|-h]
     while (it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             return printUsage();
@@ -27,6 +28,8 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
                 std.debug.print("preview: invalid port: {s}\n", .{v});
                 return error.Invalid;
             };
+        } else if (std.mem.eql(u8, arg, "--no-open")) {
+            open_browser = false;
         } else if (arg.len > 0 and arg[0] != '-') {
             if (have_positional) {
                 std.debug.print("preview: unknown arg: {s}\n", .{arg});
@@ -44,8 +47,10 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     var server = try docz.web_preview.server.PreviewServer.init(alloc, doc_root);
     defer server.deinit();
 
-    // Open the browser (best-effort, non-blocking)
-    try openBrowser(alloc, port, path);
+    // Optionally open the browser
+    if (open_browser) {
+        try openBrowser(alloc, port, path);
+    }
 
     // Block and serve
     try server.listenAndServe(port);
@@ -68,12 +73,13 @@ fn openBrowser(alloc: std.mem.Allocator, port: u16, path: []const u8) !void {
 
 fn printUsage() void {
     std.debug.print(
-        \\Usage: docz preview [<path>] [--root <dir>] [--port <num>]
+        \\Usage: docz preview [<path>] [--root <dir>] [--port <num>] [--no-open]
         \\
         \\Options:
         \\  <path>            .dcz to open initially (default: docs/SPEC.dcz)
         \\  -r, --root <dir>  Document root to serve   (default: ".")
         \\  -p, --port <num>  Port to listen on        (default: 5173)
+        \\      --no-open     Do not open a browser (useful when spawned by `docz run`)
         \\  -h, --help        Show this help
         \\
         \\Examples:
