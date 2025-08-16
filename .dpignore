@@ -3,3 +3,6 @@ zig-out/
 .zig-cache/
 .github
 .github/
+node_modules/
+node_modules
+themes/default/node_modules/

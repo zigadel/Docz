@@ -1,0 +1,14 @@
+@import "../tokens.css";
+@import "./preflight.css";
+
+/* Tailwind layers */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Small helpers that match docz.core.css defaults */
+.dcz-prose a { color: var(--color-accent); text-decoration: underline; }
+.dcz-prose code {
+  background: var(--code-bg); color: var(--code-fg);
+  padding: 0 .25em; border-radius: var(--radius);
+}

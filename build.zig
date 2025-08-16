@@ -6,10 +6,12 @@ const builtin = @import("builtin");
 fn linkPlatformNetDeps(artifact: *std.Build.Step.Compile) void {
     const rt = artifact.root_module.resolved_target orelse return;
     if (rt.result.os.tag == .windows) {
-        // std.net/std.http on Windows requires Winsock
+        // Needed for sockets + TLS + cert store + RtlGenRandom on Windows
         artifact.linkSystemLibrary("ws2_32");
+        artifact.linkSystemLibrary("advapi32"); // RtlGenRandom (SystemFunction036)
+        artifact.linkSystemLibrary("crypt32"); // CertOpenSystemStoreW, CertEnumCertificatesInStore, CertCloseStore
+        artifact.linkSystemLibrary("secur32"); // Schannel (used by std.crypto.tls on Windows)
     }
-    // Other OSes: nothing extra needed.
 }
 
 pub fn build(b: *std.Build) void {
@@ -104,6 +106,22 @@ pub fn build(b: *std.Build) void {
     cli_root_module.addImport("latex_export", latex_export_mod);
 
     // ─────────────────────────────────────────────
+    // 🧰 Vendor tool (both as module and as exe)
+    // ─────────────────────────────────────────────
+    const vendor_mod = b.createModule(.{
+        .root_source_file = b.path("tools/vendor.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const vendor_tool = b.addExecutable(.{
+        .name = "docz-vendor",
+        .root_module = vendor_mod,
+    });
+    linkPlatformNetDeps(vendor_tool);
+    b.installArtifact(vendor_tool);
+
+    // ─────────────────────────────────────────────
     // 🖥 CLI executable
     // ─────────────────────────────────────────────
     const exe = b.addExecutable(.{
@@ -150,27 +168,63 @@ pub fn build(b: *std.Build) void {
     prev_step.dependOn(&prev.step);
 
     // ─────────────────────────────────────────────
+    // 🧰 Vendor steps (OS-agnostic)
+    // ─────────────────────────────────────────────
+    const vendor_cfg = b.option([]const u8, "vendor-config", "Path to tools/vendor.config") orelse "tools/vendor.config";
+
+    // vendor (bootstrap all from config)
+    const vendor_bootstrap = b.addRunArtifact(vendor_tool);
+    vendor_bootstrap.addArgs(&.{ "bootstrap", "--config", vendor_cfg });
+    const vendor_step = b.step("vendor", "Fetch/lock/verify third_party assets from config");
+    vendor_step.dependOn(&vendor_bootstrap.step);
+
+    // vendor:freeze
+    const vendor_freeze = b.addRunArtifact(vendor_tool);
+    vendor_freeze.addArg("freeze");
+    const vendor_freeze_step = b.step("vendor-freeze", "Write third_party/VENDOR.lock");
+    vendor_freeze_step.dependOn(&vendor_freeze.step);
+
+    // vendor:checksums
+    const vendor_checks = b.addRunArtifact(vendor_tool);
+    vendor_checks.addArg("checksums");
+    const vendor_checks_step = b.step("vendor-checksums", "Write/refresh CHECKSUMS.sha256 under each version dir");
+    vendor_checks_step.dependOn(&vendor_checks.step);
+
+    // vendor:verify
+    const vendor_verify = b.addRunArtifact(vendor_tool);
+    vendor_verify.addArg("verify");
+    const vendor_verify_step = b.step("vendor-verify", "Verify CHECKSUMS against files");
+    vendor_verify_step.dependOn(&vendor_verify.step);
+
+    // ─────────────────────────────────────────────
     // 🧪 Unit tests (docz + each internal converter)
     // ─────────────────────────────────────────────
     const unit_tests = b.addTest(.{ .root_module = docz_module });
+    linkPlatformNetDeps(unit_tests);
     const unit_run = b.addRunArtifact(unit_tests);
 
     const html_import_unit = b.addTest(.{ .root_module = html_import_mod });
+    linkPlatformNetDeps(html_import_unit);
     const html_import_unit_run = b.addRunArtifact(html_import_unit);
 
     const html_export_unit = b.addTest(.{ .root_module = html_export_mod });
+    linkPlatformNetDeps(html_export_unit);
     const html_export_unit_run = b.addRunArtifact(html_export_unit);
 
     const md_import_unit = b.addTest(.{ .root_module = md_import_mod });
+    linkPlatformNetDeps(md_import_unit);
     const md_import_unit_run = b.addRunArtifact(md_import_unit);
 
     const md_export_unit = b.addTest(.{ .root_module = md_export_mod });
+    linkPlatformNetDeps(md_export_unit);
     const md_export_unit_run = b.addRunArtifact(md_export_unit);
 
     const latex_import_unit = b.addTest(.{ .root_module = latex_import_mod });
+    linkPlatformNetDeps(latex_import_unit);
     const latex_import_unit_run = b.addRunArtifact(latex_import_unit);
 
     const latex_export_unit = b.addTest(.{ .root_module = latex_export_mod });
+    linkPlatformNetDeps(latex_export_unit);
     const latex_export_unit_run = b.addRunArtifact(latex_export_unit);
 
     const unit_step = b.step("test", "Run unit tests");
@@ -232,10 +286,15 @@ pub fn build(b: *std.Build) void {
     cli_enable_mod.addImport("docz", docz_module);
 
     const cli_common_unit = b.addTest(.{ .root_module = cli_common_mod });
+    linkPlatformNetDeps(cli_common_unit);
     const cli_convert_unit = b.addTest(.{ .root_module = cli_convert_mod });
+    linkPlatformNetDeps(cli_convert_unit);
     const cli_build_unit = b.addTest(.{ .root_module = cli_build_mod });
+    linkPlatformNetDeps(cli_build_unit);
     const cli_preview_unit = b.addTest(.{ .root_module = cli_preview_mod });
+    linkPlatformNetDeps(cli_preview_unit);
     const cli_enable_unit = b.addTest(.{ .root_module = cli_enable_mod });
+    linkPlatformNetDeps(cli_enable_unit);
 
     const cli_common_run = b.addRunArtifact(cli_common_unit);
     const cli_convert_run = b.addRunArtifact(cli_convert_unit);
@@ -266,8 +325,11 @@ pub fn build(b: *std.Build) void {
     integration_module.addImport("md_export", md_export_mod);
     integration_module.addImport("latex_import", latex_import_mod);
     integration_module.addImport("latex_export", latex_export_mod);
+    // Allow tests to @import("vendor") if needed
+    integration_module.addImport("vendor", vendor_mod);
 
     const integration_tests = b.addTest(.{ .root_module = integration_module });
+    linkPlatformNetDeps(integration_tests);
     const integration_run = b.addRunArtifact(integration_tests);
     const integration_step = b.step("test-integration", "Run integration tests");
     integration_step.dependOn(&integration_run.step);
@@ -284,6 +346,7 @@ pub fn build(b: *std.Build) void {
     e2e_module.addOptions("build_options", build_opts);
 
     const e2e_tests = b.addTest(.{ .root_module = e2e_module });
+    linkPlatformNetDeps(e2e_tests);
     const e2e_run = b.addRunArtifact(e2e_tests);
 
     // Give tests an ABSOLUTE path to the e2e launcher and ensure it exists first.

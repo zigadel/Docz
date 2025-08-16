@@ -1,0 +1,8 @@
+/* Minimal preflight that respects docz.core.css */
+html, body {
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading);
+}

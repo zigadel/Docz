@@ -1,9 +1,14 @@
 .DS_Store
 
+.dpignore
+.env
+project_dump.txt
+
 .zig-cache/
 .zig-cache
 zig-out/
 zig-out
-.env
 out
 out/
+
+node_modules/

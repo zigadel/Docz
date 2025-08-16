@@ -1,0 +1,8 @@
+{
+  "root": ".",
+  "port": 5173,
+  "open": true,
+  "enable_katex": true,
+  "enable_tailwind": true,
+  "third_party_root": "third_party"
+}

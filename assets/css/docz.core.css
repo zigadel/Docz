@@ -1,0 +1,300 @@
+/* ─────────────────────────────────────────────────────────────
+   Docz Core Styles (no Tailwind required)
+   Location: assets/css/docz.core.css
+   Purpose : Opinionated, readable defaults for .dcz → HTML
+   Notes   : Tailwind themes (if vendored) are linked AFTER this file.
+   License : Public Domain / Unlicense
+   ───────────────────────────────────────────────────────────── */
+
+/* ---------- CSS variables & base palette ---------- */
+:root {
+  color-scheme: light dark;
+
+  /* Typography */
+  --docz-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+                    Arial, "Noto Sans", "Liberation Sans", system-ui, "Apple Color Emoji",
+                    "Segoe UI Emoji", "Segoe UI Symbol", sans-serif;
+  --docz-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+                    "Courier New", monospace;
+
+  /* Layout */
+  --docz-max-width: 72ch;          /* comfortable reading measure */
+  --docz-side-pad: 24px;           /* viewport gutter padding */
+  --docz-line-height: 1.6;
+
+  /* Colors (light) */
+  --docz-bg: #ffffff;
+  --docz-fg: #121316;
+  --docz-muted: #5b616b;
+  --docz-border: #e6e8eb;
+  --docz-accent: #0d6efd;          /* links */
+  --docz-code-bg: #f6f8fa;
+  --docz-code-fg: #0f1419;
+  --docz-mark-bg: #fffb91;
+
+  /* Components */
+  --docz-quote-bar: #d8dde3;
+  --docz-table-stripe: #fafbfc;
+  --docz-kbd-bg: #f3f4f6;
+  --docz-kbd-border: #e5e7eb;
+}
+
+/* Dark scheme overrides */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --docz-bg: #0f1115;
+    --docz-fg: #e8e9ec;
+    --docz-muted: #a4a8b3;
+    --docz-border: #23262d;
+    --docz-accent: #71a7ff;
+    --docz-code-bg: #171a21;
+    --docz-code-fg: #e6e9ef;
+    --docz-mark-bg: #3a3f19;
+
+    --docz-quote-bar: #2b2f37;
+    --docz-table-stripe: #13161c;
+    --docz-kbd-bg: #1b1f28;
+    --docz-kbd-border: #2a2f3a;
+  }
+}
+
+/* ---------- Page frame ---------- */
+html, body {
+  height: 100%;
+  background: var(--docz-bg);
+  color: var(--docz-fg);
+}
+
+body {
+  margin: 0;
+  font-family: var(--docz-font-sans);
+  line-height: var(--docz-line-height);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Optional wrapper class if your template uses it */
+.docz-container {
+  box-sizing: border-box;
+  max-width: var(--docz-max-width);
+  margin: 0 auto;
+  padding: 24px var(--docz-side-pad) 64px;
+}
+
+/* Make all content respect box sizing */
+*, *::before, *::after { box-sizing: border-box; }
+
+/* ---------- Headings ---------- */
+h1, h2, h3, h4, h5, h6 {
+  line-height: 1.25;
+  margin: 1.5em 0 0.6em;
+  font-weight: 700;
+}
+
+h1 { font-size: clamp(1.9rem, 2.4vw + 1rem, 2.6rem); }
+h2 { font-size: clamp(1.6rem, 1.8vw + 1rem, 2.1rem); }
+h3 { font-size: clamp(1.35rem, 1.2vw + 1rem, 1.6rem); }
+h4 { font-size: 1.2rem; }
+h5 { font-size: 1.05rem; }
+h6 { font-size: 0.95rem; color: var(--docz-muted); }
+
+h1 + h2 { margin-top: 1.1em; }
+
+/* ---------- Paragraphs & inline ---------- */
+p { margin: 0.8em 0; }
+
+b, strong { font-weight: 700; }
+em, i { font-style: italic; }
+u { text-underline-offset: 3px; }
+
+/* Docz shorthand choices:
+   **bold**  *italic*  ~~strike~~  ++underline++  `code` */
+del { text-decoration: line-through; }
+
+mark {
+  background: var(--docz-mark-bg);
+  padding: 0 .15em;
+  border-radius: 2px;
+}
+
+/* Links */
+a {
+  color: var(--docz-accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1.25px;
+  text-underline-offset: 2px;
+}
+a:hover { text-decoration-thickness: 2px; }
+
+/* Keyboard keys */
+kbd {
+  font-family: var(--docz-font-mono);
+  font-size: 0.9em;
+  background: var(--docz-kbd-bg);
+  border: 1px solid var(--docz-kbd-border);
+  border-bottom-width: 2px;
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+}
+
+/* Sup/sub spacing */
+sup, sub { line-height: 0; }
+
+/* ---------- Lists ---------- */
+ul, ol { padding-left: 1.4em; margin: 0.8em 0; }
+li + li { margin-top: 0.25em; }
+
+/* Task lists (GitHub style) */
+ul.task-list { list-style: none; padding-left: 0; }
+ul.task-list li { margin-left: 1.4em; }
+ul.task-list input[type="checkbox"] {
+  margin: 0 0.6em 0 -1.4em;
+  vertical-align: middle;
+}
+
+/* ---------- Code ---------- */
+code, pre, samp {
+  font-family: var(--docz-font-mono);
+  font-variant-ligatures: none;
+}
+
+code {
+  background: var(--docz-code-bg);
+  color: var(--docz-code-fg);
+  padding: .15em .35em;
+  border-radius: 4px;
+  border: 1px solid var(--docz-border);
+}
+
+pre {
+  background: var(--docz-code-bg);
+  color: var(--docz-code-fg);
+  padding: 14px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--docz-border);
+  overflow: auto;
+  margin: 1em 0;
+}
+pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+
+/* Line highlight helper (optional) */
+pre .line-highlight {
+  display: block;
+  background: color-mix(in srgb, var(--docz-accent) 12%, transparent);
+  margin: 0 -16px;
+  padding: 0 16px;
+}
+
+/* ---------- Blockquotes ---------- */
+blockquote {
+  margin: 1em 0;
+  padding: .6em 1em;
+  border-left: 4px solid var(--docz-quote-bar);
+  background: color-mix(in srgb, var(--docz-quote-bar) 12%, transparent);
+}
+blockquote > :first-child { margin-top: 0; }
+blockquote > :last-child { margin-bottom: 0; }
+
+/* ---------- Tables ---------- */
+table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 1.2em 0;
+  border: 1px solid var(--docz-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+thead th {
+  background: color-mix(in srgb, var(--docz-border) 50%, transparent);
+  text-align: left;
+  font-weight: 700;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--docz-border);
+}
+
+tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--docz-border);
+}
+
+tbody tr:nth-child(even) td {
+  background: var(--docz-table-stripe);
+}
+
+tbody tr:last-child td { border-bottom: 0; }
+
+/* ---------- Horizontal rule ---------- */
+hr {
+  border: 0;
+  height: 1px;
+  background: var(--docz-border);
+  margin: 2em 0;
+}
+
+/* ---------- Images / Figures ---------- */
+img, svg, video, canvas {
+  max-width: 100%;
+  height: auto;
+}
+
+figure { margin: 1.2em 0; }
+figcaption {
+  color: var(--docz-muted);
+  font-size: 0.95em;
+  text-align: center;
+  margin-top: .4em;
+}
+
+/* ---------- Math (KaTeX helpers) ----------
+   - You still include KaTeX assets separately (vendored).
+   - These classes just provide spacing & overflow behavior. */
+.math, .docz-math, .katex-display {
+  margin: 1em 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.katex { font-size: 1em; } /* leave exact size to KaTeX CSS */
+
+/* Inline math hint (if you wrap it) */
+.docz-math-inline { display: inline-block; }
+
+/* ---------- Details/Summary ---------- */
+details {
+  border: 1px solid var(--docz-border);
+  border-radius: 6px;
+  padding: .5em .8em;
+  margin: 1em 0;
+}
+details[open] { padding-bottom: .8em; }
+summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+/* ---------- Small utility classes (few, neutral) ---------- */
+.center { text-align: center; }
+.right  { text-align: right; }
+.mono   { font-family: var(--docz-font-mono); }
+
+.lead {
+  font-size: 1.1em;
+  color: var(--docz-muted);
+}
+
+.small { font-size: 0.9em; }
+
+/* ---------- Print tweaks ---------- */
+@media print {
+  :root { --docz-side-pad: 0px; }
+  body  { background: #ffffff; color: #000; }
+  a     { color: #000; text-decoration: underline; }
+  pre   { page-break-inside: avoid; }
+  img, table { page-break-inside: avoid; }
+}

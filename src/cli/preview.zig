@@ -1,18 +1,139 @@
 const std = @import("std");
 const docz = @import("docz");
 
+// -----------------------------------------------------------------------------
+// Tiny settings loader (flat JSON, no std.json dependency)
+// Reads: root (string), port (int), open (bool). CLI flags override these.
+// -----------------------------------------------------------------------------
+
+const FileSettings = struct {
+    root: []const u8 = ".",
+    port: u16 = 5173,
+    open: bool = true,
+};
+
+fn readFileAlloc(alloc: std.mem.Allocator, path: []const u8, max: usize) ![]u8 {
+    var f = try std.fs.cwd().openFile(path, .{});
+    defer f.close();
+    return try f.readToEndAlloc(alloc, max);
+}
+
+fn findJsonStringValue(buf: []const u8, key: []const u8) ?[]const u8 {
+    var pat_buf: [128]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&pat_buf);
+    const A = fba.allocator();
+    const quoted_key = std.fmt.allocPrint(A, "\"{s}\"", .{key}) catch return null;
+
+    const key_i = std.mem.indexOf(u8, buf, quoted_key) orelse return null;
+
+    var i: usize = key_i + quoted_key.len;
+    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+    if (i >= buf.len or buf[i] != ':') return null;
+    i += 1;
+
+    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+    if (i >= buf.len or buf[i] != '"') return null;
+    i += 1;
+
+    const start = i;
+    while (i < buf.len and buf[i] != '"') : (i += 1) {}
+    if (i >= buf.len) return null;
+
+    return buf[start..i];
+}
+
+fn findJsonIntValue(comptime T: type, buf: []const u8, key: []const u8) ?T {
+    var pat_buf: [128]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&pat_buf);
+    const A = fba.allocator();
+    const quoted_key = std.fmt.allocPrint(A, "\"{s}\"", .{key}) catch return null;
+
+    const key_i = std.mem.indexOf(u8, buf, quoted_key) orelse return null;
+
+    var i: usize = key_i + quoted_key.len;
+    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+    if (i >= buf.len or buf[i] != ':') return null;
+    i += 1;
+
+    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+    if (i >= buf.len) return null;
+
+    const start = i;
+    while (i < buf.len and buf[i] >= '0' and buf[i] <= '9') : (i += 1) {}
+    if (i == start) return null;
+
+    return std.fmt.parseInt(T, buf[start..i], 10) catch null;
+}
+
+fn findJsonBoolValue(buf: []const u8, key: []const u8) ?bool {
+    var pat_buf: [128]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&pat_buf);
+    const A = fba.allocator();
+    const quoted_key = std.fmt.allocPrint(A, "\"{s}\"", .{key}) catch return null;
+
+    const key_i = std.mem.indexOf(u8, buf, quoted_key) orelse return null;
+
+    var i: usize = key_i + quoted_key.len;
+    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+    if (i >= buf.len or buf[i] != ':') return null;
+    i += 1;
+
+    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+    if (i >= buf.len) return null;
+
+    if (std.mem.startsWith(u8, buf[i..], "true")) return true;
+    if (std.mem.startsWith(u8, buf[i..], "false")) return false;
+    return null;
+}
+
+fn loadFileSettings(alloc: std.mem.Allocator, path_opt: ?[]const u8) !FileSettings {
+    var s: FileSettings = .{};
+    const path = path_opt orelse "docz.settings.json";
+
+    const buf = readFileAlloc(alloc, path, 1 << 16) catch |e| {
+        if (e == error.FileNotFound) return s; // defaults if missing
+        return e;
+    };
+    defer alloc.free(buf);
+
+    if (findJsonStringValue(buf, "root")) |v| s.root = try alloc.dupe(u8, v);
+    if (findJsonIntValue(u16, buf, "port")) |p| s.port = p;
+    if (findJsonBoolValue(buf, "open")) |b| s.open = b;
+
+    return s;
+}
+
+// -----------------------------------------------------------------------------
+// CLI
+// -----------------------------------------------------------------------------
+
 pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
-    // Defaults
-    var doc_root: []const u8 = ".";
-    var port: u16 = 5173;
+    // Defaults (overridden by config file if present, and then by CLI flags)
+    var cfg_path: ?[]const u8 = null;
+    var fs = try loadFileSettings(alloc, cfg_path);
+
+    var doc_root: []const u8 = fs.root;
+    var port: u16 = fs.port;
+    var open_browser: bool = fs.open;
+
     var path: []const u8 = "docs/SPEC.dcz";
     var have_positional = false;
-    var open_browser: bool = true;
 
-    // Parse: [<path>] [--root|-r DIR] [--port|-p N] [--no-open] [--help|-h]
+    // Parse: [<path>] [--root|-r DIR] [--port|-p N] [--no-open] [--config <file>] [--help|-h]
     while (it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             return printUsage();
+        } else if (std.mem.eql(u8, arg, "--config")) {
+            const v = it.next() orelse {
+                std.debug.print("preview: --config requires a value\n", .{});
+                return error.Invalid;
+            };
+            cfg_path = v;
+            fs = try loadFileSettings(alloc, cfg_path);
+            // Re-apply config defaults unless already overridden by flags seen earlier
+            doc_root = fs.root;
+            port = fs.port;
+            open_browser = fs.open;
         } else if (std.mem.eql(u8, arg, "--root") or std.mem.eql(u8, arg, "-r")) {
             const v = it.next() orelse {
                 std.debug.print("preview: --root requires a value\n", .{});
@@ -24,7 +145,7 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
                 std.debug.print("preview: --port requires a value\n", .{});
                 return error.Invalid;
             };
-            port = std.fmt.parseUnsigned(u16, v, 10) catch {
+            port = std.fmt.parseInt(u16, v, 10) catch {
                 std.debug.print("preview: invalid port: {s}\n", .{v});
                 return error.Invalid;
             };
@@ -73,19 +194,21 @@ fn openBrowser(alloc: std.mem.Allocator, port: u16, path: []const u8) !void {
 
 fn printUsage() void {
     std.debug.print(
-        \\Usage: docz preview [<path>] [--root <dir>] [--port <num>] [--no-open]
+        \\Usage: docz preview [<path>] [--root <dir>] [--port <num>] [--no-open] [--config <file>]
         \\
         \\Options:
         \\  <path>            .dcz to open initially (default: docs/SPEC.dcz)
-        \\  -r, --root <dir>  Document root to serve   (default: ".")
-        \\  -p, --port <num>  Port to listen on        (default: 5173)
+        \\  -r, --root <dir>  Document root to serve   (default: ".", or from config)
+        \\  -p, --port <num>  Port to listen on        (default: 5173, or from config)
         \\      --no-open     Do not open a browser (useful when spawned by `docz run`)
+        \\      --config      Path to a settings JSON (default: docz.settings.json if present)
         \\  -h, --help        Show this help
         \\
         \\Examples:
         \\  docz preview
         \\  docz preview docs/SPEC.dcz
         \\  docz preview --root docs --port 8787 docs/guide.dcz
+        \\  docz preview --config my.settings.json
         \\
     , .{});
 }

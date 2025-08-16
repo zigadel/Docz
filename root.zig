@@ -9,6 +9,12 @@ pub const Renderer = @import("src/renderer/html.zig");
 
 // NOTE: DO NOT import src/main.zig here (avoids module ownership conflict)
 
+// ── Embedded assets (paths are relative to repo root)
+pub const assets = struct {
+    /// Baseline stylesheet for out-of-the-box, clean defaults.
+    pub const core_css: []const u8 = @embedFile("assets/css/docz.core.css");
+};
+
 // ── Plugin system
 const plugin_mod = @import("src/plugins/manager.zig");
 pub const PluginManager = plugin_mod.PluginManager;

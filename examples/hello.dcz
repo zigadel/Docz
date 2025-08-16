@@ -1,0 +1,17 @@
+@meta(title:"Docz Hello", author:"You")
+
+@style(mode:"global")
+heading-level-1: font-size=36px, font-weight=bold
+body-text: line-height=1.6
+
+# Hello, Docz!
+This is **bold**, *italic*, and a [link](https://ziglang.org).
+
+@math
+E = mc^2
+@end
+
+@code(lang:"zig")
+const std = @import("std");
+pub fn main() !void { std.debug.print("hi\n", .{}); }
+@end

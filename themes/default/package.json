@@ -1,0 +1,10 @@
+{
+  "name": "@docz/theme-default",
+  "private": true,
+  "devDependencies": {
+    "tailwindcss": "^3.4.10"
+  },
+  "scripts": {
+    "build": "npx tailwindcss -c tailwind.config.js -i src/input.css -o dist/docz.tailwind.css --minify"
+  }
+}

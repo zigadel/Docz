@@ -74,6 +74,13 @@ pub const PreviewServer = struct {
         _ = _srv;
         const path = req.head.target;
 
+        if (std.mem.startsWith(u8, path, "/third_party/")) {
+            // Strip the leading slash and serve from repo root
+            const rel = path[1..]; // "third_party/…"
+            std.debug.print("  route=third_party hit={s}\n", .{rel});
+            return self.serveFile(req, rel);
+        }
+
         if (std.mem.eql(u8, stripQuery(path), "/ping")) {
             return req.respond("pong\n", .{
                 .status = .ok,
@@ -155,12 +162,15 @@ pub const PreviewServer = struct {
     fn serveIndex(self: *PreviewServer, req: *std.http.Server.Request) !void {
         const html = try buildIndexHtml(self.allocator);
         defer self.allocator.free(html);
-        const cl = try u64ToTmp(self.allocator, html.len);
+
+        var cl_buf: [32]u8 = undefined;
+        const cl_str = fmtU64(&cl_buf, html.len);
+
         return req.respond(html, .{
             .status = .ok,
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "text/html; charset=utf-8" },
-                .{ .name = "Content-Length", .value = cl },
+                .{ .name = "Content-Length", .value = cl_str },
                 .{ .name = "Cache-Control", .value = "no-cache" },
                 .{ .name = "Connection", .value = "close" },
             },
@@ -291,11 +301,14 @@ pub const PreviewServer = struct {
         const n = try file.readAll(buf);
         const ctype = mimeFromPath(abs_path);
 
+        var cl_buf: [32]u8 = undefined;
+        const cl_str = fmtU64(&cl_buf, n);
+
         return req.respond(buf[0..n], .{
             .status = .ok,
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = ctype },
-                .{ .name = "Content-Length", .value = try u64ToTmp(self.allocator, n) },
+                .{ .name = "Content-Length", .value = cl_str },
             },
         });
     }
@@ -305,8 +318,9 @@ pub const PreviewServer = struct {
 //   Helper functions     //
 /////////////////////////////
 
-fn u64ToTmp(allocator: std.mem.Allocator, v: u64) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "{d}", .{v});
+fn fmtU64(buf: *[32]u8, v: u64) []const u8 {
+    // 32 bytes is more than enough for any u64 in base-10
+    return std.fmt.bufPrint(buf, "{d}", .{v}) catch unreachable;
 }
 
 fn trimTrailingSlash(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {

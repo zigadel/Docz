@@ -25,6 +25,7 @@
   - docs/SPEC.dcz
   - docs/STYLE_GUIDE.md
   - docs/WORKFLOW.md
+- docz_next_steps.md
 - examples
   - examples/all-directives.dcz
   - examples/example.dcz
@@ -32,8 +33,6 @@
   - examples/minimal.dcz.html
   - examples/sample.dcz
   - examples/youtube.md
-- out
-  - out/spec-inline.html
 - README.md
 - root.zig
 - src
@@ -78,8 +77,13 @@
     - tests/integration/pipeline.zig
     - tests/integration/renderer.zig
     - tests/integration/tokenizer.zig
+    - tests/integration/vendor_verify.zig
+    - tests/integration/web_preview_routes.zig
   - tests/test_all_e2e.zig
   - tests/test_all_integration.zig
+- third_party
+- tools
+  - tools/vendor.zig
 - vscode-extension
   - vscode-extension/package.json
   - vscode-extension/src
@@ -420,6 +424,218 @@ pub fn build(b: *std.Build) void {
     all_tests.dependOn(e2e_step);
     all_tests.dependOn(cli_unit_step);
 }
+
+<<<
+
+`docz_next_steps.md`: >>>
+
+# Context for new thread --- Docz project
+
+I'll attach two files to this message:
+
+1)  `project_dump.txt` -- my current codebase snapshot (paths + key
+    files)
+2)  `tree.txt` -- `tree /f /a` of the repo
+
+### What Docz is
+
+-   Docz is a document system with a **`.dcz`** format and a core
+    pipeline: **tokenizer → parser → AST → exporters**.
+-   We convert `.dcz` → **HTML (+ inline or external CSS)**, optionally
+    integrating **KaTeX** (default) and **TailwindCSS** (optional).
+-   We have a **web preview server** and a **dev loop**:
+    -   `docz preview` --- static server with simple routes (serves /,
+        /view?path=..., and /third_party/\*\*).
+    -   `docz run` --- compiles a `.dcz` into
+        `.zig-cache/docz-run/index.html`, spawns `docz preview`, and
+        supports **hot reload** by updating a marker file
+        `__docz_hot.txt`. The client polls this marker and reloads when
+        it changes.
+
+### Current status (already done)
+
+-   Core tokenizer/parser stabilized; tests pass.
+-   `docz run` works: builds a single `.dcz`, writes `index.html` to
+    `.zig-cache/docz-run/`, runs the preview server, injects a small
+    polling script, and updates `__docz_hot.txt` on rebuild.
+-   Preview server routes: `/`, `/view?path=…`, `/render?path=…`, static
+    fallback, **and** serves `/third_party/**` (for vendored
+    KaTeX/Tailwind assets).
+-   Logging was made quieter; hot reload polling is functional.
+-   KaTeX/Tailwind **vendoring plan** is defined (commit vendored dist
+    under `third_party/**`, keep CI offline), but the automation tool +
+    tests still need to be added.
+
+### Near-term goals (robust, low-maintenance)
+
+-   **Vendor automation** (single Zig tool) and **offline verification**
+    in CI.
+-   **Config surface** (simple optional `docz.settings.json` that the
+    CLI can read).
+-   **Exporter switches** to conditionally include KaTeX/Tailwind tags.
+-   **Hot reload polish** (debounce, quieter logs).
+-   **Integration tests** for preview routes and vendored assets.
+
+------------------------------------------------------------------------
+
+## Please execute these steps in order
+
+When I say "generate a file", I want you to write the full contents for
+that file. I'll paste it in, run tests, and come back with results.
+Assume Zig 0.15 dev channel (APIs like `std.fs.selfExePathAlloc`,
+`std.Thread.sleep`, etc.).
+
+### Step 1 --- Create the vendoring tool (cross-platform Zig)
+
+**File:** `tools/vendor.zig`
+
+**What it should do (single binary, no sh/ps1):** - Subcommands: -
+`fetch katex <version>`: download official KaTeX release (URL pattern),
+extract to `third_party/katex/<version>/…` -
+`fetch tailwind-theme <version> <url-or-path>`: place a prebuilt CSS
+theme at
+`third_party/tailwind/docz-theme-<version>/css/docz.tailwind.css` -
+`checksums`: scan all files under `third_party/**` and write/refresh
+`CHECKSUMS.sha256` next to each version folder - `verify`: verify all
+`third_party/**/CHECKSUMS.sha256` against the working tree - `freeze`:
+write/update `third_party/VENDOR.lock` with pinned versions (e.g.,
+`{ "katex": "0.16.11", "tailwind_theme": "1.0.0" }`) - Implementation
+notes: - Provide a tiny `httpGetAlloc` helper (using `std.net.tcp` +
+simple GET) to fetch archives. - Support `.zip` and `.tar.gz` via
+minimal decompression helpers (or, if that's too heavy now, support
+`.zip` first and leave tar.gz TODO). - On Windows/macOS/Linux --- no
+shelling out. Pure Zig. - Always create folders if missing; be
+idempotent.
+
+**Output:** full, compilable Zig tool with small, testable helpers
+(hashing, path joins, checksum format).
+
+------------------------------------------------------------------------
+
+### Step 2 --- Add integration test to verify vendored assets offline
+
+**File:** `tests/integration/vendor_verify.zig`
+
+**What to test:** - Calls into `tools/vendor.zig`'s `verify` (exposed as
+a library function or using a tiny internal module you can import). -
+Fails if any checksum mismatch or missing file. - Succeeds with current
+tree (we'll wire initial KaTeX/Tailwind assets next steps; for now
+scaffold the test and mark it skipped behind a `// TODO` pragma if
+strictly needed).
+
+------------------------------------------------------------------------
+
+### Step 3 --- Wire preview server to serve `/third_party/**` (if not already stable)
+
+**File to modify:** `web-preview/server.zig`
+
+**What to ensure:** - Requests starting with `/third_party/` resolve to
+repo's `./third_party/...` (no copying to `.zig-cache/docz-run`). -
+Add/confirm correct content types (`.css`, `.js`, fonts, images). - Make
+`GET /__docz_hot.txt` **silent** by default (no log spam).
+
+------------------------------------------------------------------------
+
+### Step 4 --- Exporter toggles for KaTeX/Tailwind
+
+**File to modify:** `src/renderer/html.zig` (or
+`src/renderer/html_export.zig`, wherever head tags are emitted)
+
+**Add:** - Options struct:
+`{ enable_katex: bool = true, enable_tailwind: bool = false, third_party_root: []const u8 = "/third_party" }` -
+When `enable_katex`:
+`html   <link rel="stylesheet" href="/third_party/katex/<VER>/dist/katex.min.css">   <script defer src="/third_party/katex/<VER>/dist/katex.min.js"></script>   <script defer src="/third_party/katex/<VER>/dist/contrib/auto-render.min.js"           onload="renderMathInElement(document.body)"></script>` -
+When `enable_tailwind`:
+`html   <link rel="stylesheet" href="/third_party/tailwind/docz-theme-<VER>/css/docz.tailwind.css">` -
+Version comes from a small internal function that tries
+`third_party/VENDOR.lock` and falls back to a default constant if
+absent.
+
+------------------------------------------------------------------------
+
+### Step 5 --- CLI config file support
+
+**Files to add/modify:** - `src/cli/common_settings.zig` --- tiny reader
+for `docz.settings.json` (all fields optional):
+`json   {     "preview": { "port": 5173, "open": true },     "render":  { "tailwind": false, "katex": true },     "paths":   { "third_party": "third_party" }   }` -
+Read this in `run.zig` and `preview.zig`. CLI flags still override
+settings.
+
+------------------------------------------------------------------------
+
+### Step 6 --- Improve hot reload polish
+
+**File to modify:** `src/cli/run.zig` - Implement **debounce**: when
+mtime changes, wait \~60ms and rebuild once. - Keep interval at
+100--150ms. - Update `__docz_hot.txt` **after** writing `index.html`. -
+Don't log the polling requests; only log rebuild events.
+
+------------------------------------------------------------------------
+
+### Step 7 --- Integration tests for preview routes
+
+**File:** `tests/integration/web_routes.zig` - Start preview server
+in-process with a temp root; place a tiny HTML in that root and assert
+200 on `/`. - Assert 200 for `/third_party/.../katex.min.css` (after
+vendoring is populated). - Assert `/view?path=docs/SPEC.dcz` responds
+with HTML that includes KaTeX tags when enabled.
+
+------------------------------------------------------------------------
+
+### Step 8 --- E2E smoke: render a `.dcz` end-to-end
+
+**File:** `tests/e2e/preview_render.zig` - Write a temp `.dcz` with
+`@math` and a paragraph. - Call the "render" endpoint or reuse exporter
+to ensure KaTeX assets are included and `@math` round-trips.
+
+------------------------------------------------------------------------
+
+### Step 9 --- CI workflows
+
+**Files:** - `.github/workflows/ci.yml`: - Build & run tests
+(`zig build test-all`). - Run `tools/vendor.zig verify`. -
+`.github/workflows/update-vendor.yml` (manual dispatch): - Inputs:
+`katex_version`, `tailwind_theme_version`, `theme_url` (optional). -
+Steps: fetch → checksums → verify → commit updated `third_party/**` and
+`VENDOR.lock`.
+
+------------------------------------------------------------------------
+
+### Step 10 --- Docs and examples
+
+**Files:** - `docs/SETUP.md`: explains KaTeX/Tailwind vendoring, how to
+bump versions, and local dev commands. - `examples/`: -
+`examples/math/SAMPLE.dcz` with `@math` and styling. -
+`examples/tailwind/…` showing Tailwind on/off in `docz.settings.json`.
+
+------------------------------------------------------------------------
+
+### Step 11 (nice-to-have, after the 10 above) --- optional SSE push
+
+-   Use your existing `web-preview/hot_reload.zig` broadcaster.
+-   Add `/events` endpoint (text/event-stream) and switch the client
+    script from polling to SSE when available.
+-   Keep polling as fallback (off by default or behind a flag).
+
+------------------------------------------------------------------------
+
+### Commands I'll run locally (so please keep them working)
+
+-   Dev loop:\
+    `zig build run -- run docs/SPEC.dcz`
+-   Just server (when I already have `.zig-cache/docz-run/index.html`):\
+    `zig build preview -- --root .zig-cache/docz-run --port 5173 --no-open`
+-   Vendor verify:\
+    `zig run tools/vendor.zig -- verify`
+-   (When bumping)\
+    `zig run tools/vendor.zig -- fetch katex 0.16.11`\
+    `zig run tools/vendor.zig -- checksums`\
+    `zig run tools/vendor.zig -- verify`
+
+------------------------------------------------------------------------
+
+**Start with Step 1 now.** Please generate `tools/vendor.zig` exactly as
+specified. Then I'll paste it in, run it, and report back.
 
 <<<
 
@@ -958,21 +1174,6 @@ const Parser = @import("../src/parser/parser.zig");
 const Renderer = @import("../src/renderer/html.zig");
 const HtmlExport = @import("html_export");
 
-/// Writes SSE bytes to an in-flight streaming HTTP response (currently unused).
-const SinkWrap = struct {
-    res_ptr: *std.http.Server.Response,
-
-    fn make(self: *SinkWrap) hot.Sink {
-        return .{ .ctx = self, .writeFn = write };
-    }
-
-    fn write(ctx: *anyopaque, bytes: []const u8) !void {
-        var self: *SinkWrap = @ptrCast(@alignCast(ctx));
-        try self.res_ptr.writer().writeAll(bytes);
-        try self.res_ptr.flush();
-    }
-};
-
 pub const PreviewServer = struct {
     allocator: std.mem.Allocator,
     doc_root: []const u8,
@@ -981,7 +1182,6 @@ pub const PreviewServer = struct {
     pub fn init(allocator: std.mem.Allocator, doc_root: []const u8) !PreviewServer {
         const trimmed = try trimTrailingSlash(allocator, doc_root);
         errdefer allocator.free(trimmed);
-
         return .{
             .allocator = allocator,
             .doc_root = trimmed,
@@ -996,7 +1196,6 @@ pub const PreviewServer = struct {
 
     pub fn listenAndServe(self: *PreviewServer, port: u16) !void {
         const addr = try std.net.Address.parseIp4("127.0.0.1", port);
-
         var tcp = try std.net.Address.listen(addr, .{ .reuse_address = true });
         defer tcp.deinit();
 
@@ -1006,27 +1205,30 @@ pub const PreviewServer = struct {
         _ = try std.Thread.spawn(.{}, pollFileAndBroadcast, .{ &self.broadcaster, "docs/SPEC.dcz", 250 });
 
         while (true) {
-            const t_accept = std.time.milliTimestamp();
             const net_conn = try tcp.accept();
             defer net_conn.stream.close();
 
             var read_buf: [16 * 1024]u8 = undefined;
             var http = std.http.Server.init(net_conn, &read_buf);
 
-            // Serve exactly one request per TCP connection so we never “hang” on keep-alive.
             var req = http.receiveHead() catch |e| {
-                std.debug.print("❌ receiveHead error after accept (+{d}ms): {s}\n", .{ std.time.milliTimestamp() - t_accept, @errorName(e) });
+                std.debug.print("❌ receiveHead error: {s}\n", .{@errorName(e)});
                 continue;
             };
 
-            // Basic request line logging
-            std.debug.print("→ {s} {s}\n", .{ @tagName(req.head.method), req.head.target });
+            const path = req.head.target;
+            const bare_path = stripQuery(path);
 
-            // Handle; if it throws, send 500 so the client doesn’t spin forever.
+            // Silence hot marker + favicon noise
+            const is_hot = std.mem.eql(u8, bare_path, "/__docz_hot.txt");
+            const is_favicon = std.mem.eql(u8, bare_path, "/favicon.ico");
+            if (!is_hot and !is_favicon) {
+                std.debug.print("→ {s} {s}\n", .{ @tagName(req.head.method), path });
+            }
+
             self.handle(&http, &req) catch |e| {
                 std.debug.print("❌ handler error: {s}\n", .{@errorName(e)});
                 const msg = "Internal server error\n";
-                // Best-effort: try to reply; if this fails, we just close the socket.
                 _ = req.respond(msg, .{
                     .status = .internal_server_error,
                     .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain; charset=utf-8" }},
@@ -1039,8 +1241,15 @@ pub const PreviewServer = struct {
         _ = _srv;
         const path = req.head.target;
 
+        if (std.mem.startsWith(u8, path, "/third_party/")) {
+            // Strip the leading slash and serve from repo root
+            // (we want absolute path relative to CWD: "./third_party/…")
+            const rel = path[1..]; // "third_party/…"
+            std.debug.print("  route=third_party hit={s}\n", .{rel});
+            return self.serveFile(req, rel);
+        }
+
         if (std.mem.eql(u8, stripQuery(path), "/ping")) {
-            // Quick sanity check endpoint
             return req.respond("pong\n", .{
                 .status = .ok,
                 .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain; charset=utf-8" }},
@@ -1054,14 +1263,23 @@ pub const PreviewServer = struct {
             });
         }
 
+        // Placeholder SSE endpoint (non-streaming to match your Zig stdlib)
+        if (std.mem.eql(u8, stripQuery(path), "/hot")) {
+            return handleSSE(req);
+        }
+
         if (std.mem.startsWith(u8, path, "/render")) {
-            const fs_path = queryParam(path, "path") orelse "docs/SPEC.dcz";
+            const raw = queryParam(path, "path") orelse "docs/SPEC.dcz";
+            const fs_path = try urlDecode(self.allocator, raw);
+            defer self.allocator.free(fs_path);
             std.debug.print("  route=/render path={s}\n", .{fs_path});
             return self.serveRenderedFragment(req, fs_path);
         }
 
         if (std.mem.startsWith(u8, path, "/view")) {
-            const fs_path = queryParam(path, "path") orelse "docs/SPEC.dcz";
+            const raw = queryParam(path, "path") orelse "docs/SPEC.dcz";
+            const fs_path = try urlDecode(self.allocator, raw);
+            defer self.allocator.free(fs_path);
             std.debug.print("  route=/view path={s}\n", .{fs_path});
             return self.serveRenderedDcz(req, fs_path);
         }
@@ -1070,14 +1288,16 @@ pub const PreviewServer = struct {
         defer self.allocator.free(safe_rel);
 
         if (safe_rel.len == 0 or std.mem.eql(u8, safe_rel, ".")) {
-            std.debug.print("  route=/ (index)\n", .{});
+            // index shell that redirects to /view?path=...
             return self.serveIndex(req);
         }
 
         const candidate_a = try join2(self.allocator, self.doc_root, safe_rel);
         defer self.allocator.free(candidate_a);
         if (fileExists(candidate_a)) {
-            std.debug.print("  route=static hit={s}\n", .{candidate_a});
+            if (!std.mem.endsWith(u8, safe_rel, "__docz_hot.txt")) {
+                std.debug.print("  route=static hit={s}\n", .{candidate_a});
+            }
             return self.serveFile(req, candidate_a);
         }
 
@@ -1094,17 +1314,15 @@ pub const PreviewServer = struct {
         return self.serveIndex(req);
     }
 
-    // Placeholder (no streaming in this snapshot).
-    fn handleSSE(self: *PreviewServer, req: *std.http.Server.Request) !void {
-        _ = self;
-        const body = "SSE not enabled on this Zig build.\n";
+    // Non-streaming placeholder so it compiles on your Zig
+    fn handleSSE(req: *std.http.Server.Request) !void {
+        const body = "SSE endpoint placeholder (streaming disabled in this build).\n";
         return req.respond(body, .{
             .status = .ok,
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "text/plain; charset=utf-8" },
                 .{ .name = "Cache-Control", .value = "no-cache" },
-                .{ .name = "Connection", .value = "keep-alive" },
-                .{ .name = "Access-Control-Allow-Origin", .value = "*" },
+                .{ .name = "Connection", .value = "close" },
             },
         });
     }
@@ -1112,9 +1330,7 @@ pub const PreviewServer = struct {
     fn serveIndex(self: *PreviewServer, req: *std.http.Server.Request) !void {
         const html = try buildIndexHtml(self.allocator);
         defer self.allocator.free(html);
-
         const cl = try u64ToTmp(self.allocator, html.len);
-        // It's fine to leak per-request a tiny header string for now; you can pool later.
         return req.respond(html, .{
             .status = .ok,
             .extra_headers = &.{
@@ -1362,6 +1578,47 @@ fn queryParam(target: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
+fn urlDecode(allocator: std.mem.Allocator, enc: []const u8) ![]u8 {
+    var out = try allocator.alloc(u8, enc.len);
+    var j: usize = 0;
+    var i: usize = 0;
+    while (i < enc.len) : (i += 1) {
+        const c = enc[i];
+        if (c == '%' and i + 2 < enc.len) {
+            const h1 = enc[i + 1];
+            const h2 = enc[i + 2];
+            const v1 = hexVal(h1) orelse blk: {
+                out[j] = c;
+                j += 1;
+                break :blk null;
+            };
+            const v2 = hexVal(h2) orelse blk: {
+                out[j] = c;
+                j += 1;
+                break :blk null;
+            };
+            if (v1 != null and v2 != null) {
+                out[j] = (@as(u8, v1.?) << 4) | @as(u8, v2.?);
+                j += 1;
+                i += 2;
+                continue;
+            }
+        }
+        out[j] = c;
+        j += 1;
+    }
+    return allocator.realloc(out, j);
+}
+
+fn hexVal(c: u8) ?u4 {
+    return switch (c) {
+        '0'...'9' => @intCast(c - '0'),
+        'a'...'f' => @intCast(10 + (c - 'a')),
+        'A'...'F' => @intCast(10 + (c - 'A')),
+        else => null,
+    };
+}
+
 fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     var f = try std.fs.cwd().openFile(path, .{});
     defer f.close();
@@ -1431,18 +1688,6 @@ fn buildIndexHtml(allocator: std.mem.Allocator) ![]u8 {
     return allocator.dupe(u8, tpl);
 }
 
-fn isClientStillRegistered(bc: *const hot.Broadcaster, id: u64) bool {
-    for (bc.clients.items) |c| if (c.id == id) return true;
-    return false;
-}
-
-test "mimeFromPath basics" {
-    try std.testing.expectEqualStrings("text/html; charset=utf-8", mimeFromPath("x.html"));
-    try std.testing.expectEqualStrings("text/css; charset=utf-8", mimeFromPath("x.css"));
-    try std.testing.expectEqualStrings("image/png", mimeFromPath("x.png"));
-    try std.testing.expectEqualStrings("application/octet-stream", mimeFromPath("x.bin"));
-}
-
 <<<
 
 `package.json`: >>>
@@ -1452,6 +1697,275 @@ test "mimeFromPath basics" {
 
 `extension.ts`: >>>
 
+
+<<<
+
+`vendor.zig`: >>>
+
+const std = @import("std");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    var it = try std.process.argsWithAllocator(A);
+    defer it.deinit();
+    _ = it.next(); // prog
+
+    const cmd = it.next() orelse return usage();
+
+    if (std.mem.eql(u8, cmd, "katex")) return try cmdKatex(A, &it);
+    if (std.mem.eql(u8, cmd, "tailwind")) return try cmdTailwind(A, &it);
+    if (std.mem.eql(u8, cmd, "checksums")) return try cmdChecksums(A);
+    if (std.mem.eql(u8, cmd, "verify")) return try cmdVerify(A);
+
+    return usage();
+}
+
+fn usage() !void {
+    std.debug.print(
+        \\Usage:
+        \\  zig run tools/vendor.zig -- katex <version>
+        \\  zig run tools/vendor.zig -- tailwind <label> --url <asset_url>
+        \\  zig run tools/vendor.zig -- checksums
+        \\  zig run tools/vendor.zig -- verify
+        \n, .{});
+    return error.Invalid;
+}
+
+// ---------------- HTTP helpers ----------------
+
+fn httpGetToFile(A: std.mem.Allocator, url: []const u8, dest: []const u8) !void {
+    var client = std.http.Client{ .allocator = A };
+    defer client.deinit();
+
+    var uri = try std.Uri.parse(url);
+    var req = try client.request(.GET, uri, .{
+        .server_header_buffer = &[_]u8{},
+        .redirect_behavior = .follow,
+    }, .{});
+    defer req.deinit();
+
+    try req.start();
+    try req.finish();
+    try req.wait();
+
+    if (req.response.status_class() != .success) {
+        std.debug.print("HTTP {d} for {s}\n", .{ @intFromEnum(req.response.status), url });
+        return error.HttpFailed;
+    }
+
+    // ensure parent dir
+    if (std.fs.path.dirname(dest)) |d| try std.fs.cwd().makePath(d);
+
+    var f = try std.fs.cwd().createFile(dest, .{ .truncate = true });
+    defer f.close();
+
+    var buf: [16 * 1024]u8 = undefined;
+    while (true) {
+        const n = try req.reader().read(&buf);
+        if (n == 0) break;
+        try f.writeAll(buf[0..n]);
+    }
+}
+
+fn writeTextFile(dest: []const u8, body: []const u8) !void {
+    if (std.fs.path.dirname(dest)) |d| try std.fs.cwd().makePath(d);
+    var f = try std.fs.cwd().createFile(dest, .{ .truncate = true });
+    defer f.close();
+    try f.writeAll(body);
+}
+
+// ---------------- KaTeX ----------------
+
+fn cmdKatex(A: std.mem.Allocator, it: *std.process.ArgIterator) !void {
+    const ver = it.next() orelse {
+        std.debug.print("katex: missing <version>, e.g. 0.16.11\n", .{});
+        return error.Invalid;
+    };
+    const base = try std.fmt.allocPrint(A, "third_party/katex/{s}", .{ver});
+    defer A.free(base);
+
+    // read manifest
+    const manifest_path = "tools/manifests/katex-dist.txt";
+    var mf = try std.fs.cwd().openFile(manifest_path, .{});
+    defer mf.close();
+    const mb = try mf.readToEndAlloc(A, 1 << 16);
+    defer A.free(mb);
+
+    var ok: usize = 0;
+    var itl = std.mem.splitScalar(u8, mb, '\n');
+    while (itl.next()) |raw| {
+        const path = std.mem.trim(u8, raw, " \t\r");
+        if (path.len == 0 or path[0] == '#') continue;
+
+        const url = try std.fmt.allocPrint(A, "https://cdn.jsdelivr.net/npm/katex@{s}/{s}", .{ ver, path });
+        defer A.free(url);
+
+        const dest = try std.fs.path.join(A, &.{ base, path });
+        defer A.free(dest);
+
+        try httpGetToFile(A, url, dest);
+        ok += 1;
+    }
+
+    // VERSION file
+    const vfile = try std.fs.path.join(A, &.{ base, "VERSION" });
+    defer A.free(vfile);
+    try writeTextFile(vfile, ver);
+
+    std.debug.print("katex: fetched {d} files into {s}\n", .{ ok, base });
+}
+
+// ---------------- Tailwind theme ----------------
+
+fn cmdTailwind(A: std.mem.Allocator, it: *std.process.ArgIterator) !void {
+    const label = it.next() orelse {
+        std.debug.print("tailwind: missing <label>, e.g. docz-theme-1.0.0\n", .{});
+        return error.Invalid;
+    };
+
+    var url_opt: ?[]const u8 = null;
+    while (it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--url")) {
+            url_opt = it.next() orelse {
+                std.debug.print("tailwind: --url <asset_url> required\n", .{});
+                return error.Invalid;
+            };
+        } else {
+            std.debug.print("tailwind: unknown arg: {s}\n", .{arg});
+            return error.Invalid;
+        }
+    }
+    const url = url_opt orelse {
+        std.debug.print("tailwind: --url is required (points to prebuilt CSS)\n", .{});
+        return error.Invalid;
+    };
+
+    const base = try std.fmt.allocPrint(A, "third_party/tailwind/{s}", .{label});
+    defer A.free(base);
+
+    const dest = try std.fs.path.join(A, &.{ base, "css", "docz.tailwind.css" });
+    defer A.free(dest);
+
+    try httpGetToFile(A, url, dest);
+
+    const vfile = try std.fs.path.join(A, &.{ base, "VERSION" });
+    defer A.free(vfile);
+    try writeTextFile(vfile, label);
+
+    std.debug.print("tailwind: fetched {s} -> {s}\n", .{ url, dest });
+}
+
+// ---------------- Checksums & Verify ----------------
+
+fn walkFilesCollect(A: std.mem.Allocator, root: []const u8, list: *std.ArrayList([]const u8)) !void {
+    var dir = try std.fs.cwd().openDir(root, .{ .iterate = true });
+    defer dir.close();
+
+    var it = dir.iterate();
+    while (try it.next()) |e| {
+        if (e.kind == .file) {
+            const p = try std.fs.path.join(A, &.{ root, e.name });
+            try list.append(p);
+        } else if (e.kind == .directory) {
+            const sub = try std.fs.path.join(A, &.{ root, e.name });
+            defer A.free(sub);
+            try walkFilesCollect(A, sub, list);
+        }
+    }
+}
+
+fn sha256Hex(A: std.mem.Allocator, path: []const u8) ![]u8 {
+    var f = try std.fs.cwd().openFile(path, .{});
+    defer f.close();
+    const st = try f.stat();
+    var buf = try A.alloc(u8, @intCast(st.size));
+    defer A.free(buf);
+    _ = try f.readAll(buf);
+
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    h.update(buf);
+    var out: [32]u8 = undefined;
+    h.final(&out);
+
+    var hex: [64]u8 = undefined;
+    _ = std.fmt.bufPrint(&hex, "{s}", .{std.fmt.fmtSliceHexLower(&out)}) catch unreachable;
+    return A.dupe(u8, &hex);
+}
+
+fn writeChecksumsFor(A: std.mem.Allocator, base: []const u8) !void {
+    var files = std.ArrayList([]const u8).init(A);
+    defer {
+        for (files.items) |p| A.free(p);
+        files.deinit();
+    }
+    try walkFilesCollect(A, base, &files);
+
+    // open output
+    const outp = try std.fs.path.join(A, &.{ base, "CHECKSUMS.sha256" });
+    defer A.free(outp);
+    var f = try std.fs.cwd().createFile(outp, .{ .truncate = true });
+    defer f.close();
+
+    // write relative paths
+    for (files.items) |abs| {
+        if (std.mem.endsWith(u8, abs, "CHECKSUMS.sha256")) continue;
+        if (std.mem.endsWith(u8, abs, "VERSION")) continue;
+        const hex = try sha256Hex(A, abs);
+        defer A.free(hex);
+        const rel = abs[base.len + 1 ..];
+        try f.writer().print("{s}  {s}\n", .{ hex, rel });
+    }
+}
+
+fn cmdChecksums(A: std.mem.Allocator) !void {
+    try writeChecksumsFor(A, "third_party/katex/0.16.11"); // add more versions as needed
+    try writeChecksumsFor(A, "third_party/tailwind/docz-theme-1.0.0");
+    std.debug.print("checksums: updated\n", .{});
+}
+
+fn verifyOne(A: std.mem.Allocator, base: []const u8) !void {
+    const cpath = try std.fs.path.join(A, &.{ base, "CHECKSUMS.sha256" });
+    defer A.free(cpath);
+    var f = try std.fs.cwd().openFile(cpath, .{});
+    defer f.close();
+    const buf = try f.readToEndAlloc(A, 1 << 22);
+    defer A.free(buf);
+
+    var ok: usize = 0;
+    var tot: usize = 0;
+
+    var lines = std.mem.splitScalar(u8, buf, '\n');
+    while (lines.next()) |ln_raw| {
+        const ln = std.mem.trim(u8, ln_raw, " \t\r");
+        if (ln.len == 0) continue;
+        if (ln.len < 66) return error.BadChecksumLine;
+        const hex = ln[0..64];
+        var sp = ln[64..];
+        while (sp.len > 0 and (sp[0] == ' ' or sp[0] == '\t')) sp = sp[1..];
+        const rel = sp;
+
+        const abs = try std.fs.path.join(A, &.{ base, rel });
+        defer A.free(abs);
+        const got = try sha256Hex(A, abs);
+        defer A.free(got);
+
+        tot += 1;
+        if (!std.mem.eql(u8, hex, got)) {
+            std.debug.print("mismatch: {s}\n", .{abs});
+            return error.ChecksumMismatch;
+        }
+        ok += 1;
+    }
+    std.debug.print("verify: {d}/{d} ok under {s}\n", .{ ok, tot, base });
+}
+
+fn cmdVerify(A: std.mem.Allocator) !void {
+    try verifyOne(A, "third_party/katex/0.16.11");
+    try verifyOne(A, "third_party/tailwind/docz-theme-1.0.0");
+}
 
 <<<
 
@@ -1853,6 +2367,58 @@ test "integration: tokenizer produces correct tokens from .dcz input" {
     // }
 
     try std.testing.expect(tokens.len > 2);
+}
+
+<<<
+
+`vendor_verify.zig`: >>>
+
+const std = @import("std");
+const vendor = @import("../tools/vendor.zig"); // expose verifyOne or a small wrapper
+
+test "third_party checksums verify" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    try vendor.verifyOne(A, "third_party/katex/0.16.11");
+    try vendor.verifyOne(A, "third_party/tailwind/docz-theme-1.0.0");
+}
+
+<<<
+
+`web_preview_routes.zig`: >>>
+
+const std = @import("std");
+const server_mod = @import("../../web-preview/server.zig");
+
+test "preview serves third_party assets" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    var srv = try server_mod.PreviewServer.init(A, ".");
+    defer srv.deinit();
+
+    // Start server in background
+    const port: u16 = 5179;
+    _ = try std.Thread.spawn(.{}, server_mod.PreviewServer.listenAndServe, .{ &srv, port });
+    std.time.sleep(200 * std.time.ms_per_s / 1000); // tiny delay
+
+    // Simple HTTP GET for a known asset
+    var client = std.http.Client{ .allocator = A };
+    defer client.deinit();
+
+    const url = try std.fmt.allocPrint(A, "http://127.0.0.1:{d}/third_party/katex/0.16.11/dist/katex.min.css", .{port});
+    defer A.free(url);
+    const uri = try std.Uri.parse(url);
+    var req = try client.request(.GET, uri, .{}, .{});
+    defer req.deinit();
+    try req.start();
+    try req.finish();
+    try req.wait();
+
+    try std.testing.expectEqual(@as(u16, 200), @intFromEnum(req.response.status));
 }
 
 <<<
@@ -6079,8 +6645,9 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     var port: u16 = 5173;
     var path: []const u8 = "docs/SPEC.dcz";
     var have_positional = false;
+    var open_browser: bool = true;
 
-    // Parse: [<path>] [--root|-r DIR] [--port|-p N] [--help|-h]
+    // Parse: [<path>] [--root|-r DIR] [--port|-p N] [--no-open] [--help|-h]
     while (it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             return printUsage();
@@ -6099,6 +6666,8 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
                 std.debug.print("preview: invalid port: {s}\n", .{v});
                 return error.Invalid;
             };
+        } else if (std.mem.eql(u8, arg, "--no-open")) {
+            open_browser = false;
         } else if (arg.len > 0 and arg[0] != '-') {
             if (have_positional) {
                 std.debug.print("preview: unknown arg: {s}\n", .{arg});
@@ -6116,8 +6685,10 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     var server = try docz.web_preview.server.PreviewServer.init(alloc, doc_root);
     defer server.deinit();
 
-    // Open the browser (best-effort, non-blocking)
-    try openBrowser(alloc, port, path);
+    // Optionally open the browser
+    if (open_browser) {
+        try openBrowser(alloc, port, path);
+    }
 
     // Block and serve
     try server.listenAndServe(port);
@@ -6140,12 +6711,13 @@ fn openBrowser(alloc: std.mem.Allocator, port: u16, path: []const u8) !void {
 
 fn printUsage() void {
     std.debug.print(
-        \\Usage: docz preview [<path>] [--root <dir>] [--port <num>]
+        \\Usage: docz preview [<path>] [--root <dir>] [--port <num>] [--no-open]
         \\
         \\Options:
         \\  <path>            .dcz to open initially (default: docs/SPEC.dcz)
         \\  -r, --root <dir>  Document root to serve   (default: ".")
         \\  -p, --port <num>  Port to listen on        (default: 5173)
+        \\      --no-open     Do not open a browser (useful when spawned by `docz run`)
         \\  -h, --help        Show this help
         \\
         \\Examples:
@@ -6169,10 +6741,7 @@ const std = @import("std");
 const docz = @import("docz");
 
 const html_export = @import("html_export");
-const md_import = @import("md_import");
-const html_import = @import("html_import");
-const latex_import = @import("latex_import");
-const latex_export = @import("latex_export");
+// (md/html/tex import/export are available elsewhere; not needed here)
 
 const Kind = enum { dcz, md, html, tex };
 
@@ -6202,16 +6771,6 @@ fn writeFile(path: []const u8, data: []const u8) !void {
     try f.writeAll(data);
 }
 
-fn replaceExt(alloc: std.mem.Allocator, path: []const u8, new_ext_with_dot: []const u8) ![]u8 {
-    const dir = std.fs.path.dirname(path);
-    const stem = std.fs.path.stem(path);
-    if (dir) |d| {
-        return try std.fmt.allocPrint(alloc, "{s}{c}{s}{s}", .{ d, std.fs.path.sep, stem, new_ext_with_dot });
-    } else {
-        return try std.fmt.allocPrint(alloc, "{s}{s}", .{ stem, new_ext_with_dot });
-    }
-}
-
 fn insertCssLinkBeforeHeadClose(alloc: std.mem.Allocator, html: []const u8, href: []const u8) ![]u8 {
     const needle = "</head>";
     const idx_opt = std.mem.indexOf(u8, html, needle);
@@ -6231,6 +6790,7 @@ fn insertCssLinkBeforeHeadClose(alloc: std.mem.Allocator, html: []const u8, href
     return out.toOwnedSlice();
 }
 
+// --- tiny pretty printer (unchanged) ---
 fn prettyHtml(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
     var out = std.ArrayList(u8).init(alloc);
     errdefer out.deinit();
@@ -6300,11 +6860,73 @@ fn prettyHtml(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
     return out.toOwnedSlice();
 }
 
+// --------- Live reload helpers (poll file) ---------
+
+const LIVE_MARKER = "__docz_hot.txt";
+
+fn writeHotMarker(alloc: std.mem.Allocator, out_dir: []const u8) !void {
+    const path = try std.fs.path.join(alloc, &.{ out_dir, LIVE_MARKER });
+    defer alloc.free(path);
+
+    // Hash the i128 timestamp to a u64 seed (portable across Zig versions)
+    const t: i128 = std.time.nanoTimestamp();
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(std.mem.asBytes(&t));
+    const seed: u64 = hasher.final();
+
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random().int(u64);
+
+    const payload = try std.fmt.allocPrint(alloc, "{d}-{x}\n", .{ std.time.milliTimestamp(), r });
+    defer alloc.free(payload);
+
+    try writeFile(path, payload);
+}
+
+fn injectLiveScript(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
+    const script =
+        \\<script>
+        \\(function(){
+        \\  var URL = "__DOCZ_HOT__";
+        \\  var last = null;
+        \\  function tick(){
+        \\    fetch(URL, {cache: 'no-store'}).then(function(r){return r.text()}).then(function(t){
+        \\      if (last === null) last = t;
+        \\      else if (t !== last) location.reload();
+        \\    }).catch(function(_){}).finally(function(){ setTimeout(tick, 500); });
+        \\  }
+        \\  tick();
+        \\})();
+        \\</script>
+        \\
+    ;
+
+    const idx_opt = std.mem.indexOf(u8, html, "</body>");
+    const tag = try std.fmt.allocPrint(alloc, "{s}", .{script});
+    defer alloc.free(tag);
+
+    const with_url = try std.mem.replaceOwned(u8, alloc, tag, "__DOCZ_HOT__", LIVE_MARKER);
+    errdefer alloc.free(with_url);
+
+    if (idx_opt) |idx| {
+        var out = std.ArrayList(u8).init(alloc);
+        errdefer out.deinit();
+        try out.appendSlice(html[0..idx]);
+        try out.appendSlice(with_url);
+        try out.appendSlice(html[idx..]);
+        return out.toOwnedSlice();
+    }
+
+    // Fallback: append at end if no </body>
+    return std.fmt.allocPrint(alloc, "{s}\n{s}", .{ html, with_url });
+}
+
 const CssMode = enum { inline_css, file };
 
 const GenerateOpts = struct {
     css_mode: CssMode = .inline_css,
     pretty: bool = true,
+    live_reload: bool = true,
     css_file_name: []const u8 = "docz.css",
 };
 
@@ -6320,6 +6942,7 @@ fn generateOnce(
     const kind = detectKindFromPath(dcz_path) orelse return error.Unsupported;
     if (kind != .dcz) return error.ExpectedDcz;
 
+    // DCZ -> AST
     const tokens = try docz.Tokenizer.tokenize(input, alloc);
     defer {
         docz.Tokenizer.freeTokens(alloc, tokens);
@@ -6328,6 +6951,7 @@ fn generateOnce(
     var ast = try docz.Parser.parse(tokens, alloc);
     defer ast.deinit();
 
+    // HTML with inline <style>
     const html_inline = try html_export.exportHtml(&ast, alloc);
     errdefer alloc.free(html_inline);
 
@@ -6350,6 +6974,12 @@ fn generateOnce(
         final_html = linked;
     }
 
+    if (opts.live_reload) {
+        const with_live = try injectLiveScript(alloc, final_html);
+        alloc.free(final_html);
+        final_html = with_live;
+    }
+
     if (opts.pretty) {
         const pretty = try prettyHtml(alloc, final_html);
         alloc.free(final_html);
@@ -6361,6 +6991,9 @@ fn generateOnce(
 
     try writeFile(html_out, final_html);
     alloc.free(final_html);
+
+    // Update hot marker last (so the browser only reloads when the new HTML is fully written)
+    if (opts.live_reload) try writeHotMarker(alloc, out_dir);
 }
 
 fn fileMTime(path: []const u8) !i128 {
@@ -6383,7 +7016,8 @@ fn spawnPreview(alloc: std.mem.Allocator, root_dir: []const u8, port: u16) !std.
     const port_str = try std.fmt.allocPrint(alloc, "{}", .{port});
     defer alloc.free(port_str);
     try argv.append(port_str);
-    // NOTE: do NOT append "index.html" here
+    // prevent preview from opening its own tab (run opens the correct one)
+    try argv.append("--no-open");
 
     var child = std.process.Child.init(argv.items, alloc);
     child.stdin_behavior = .Ignore;
@@ -6394,12 +7028,27 @@ fn spawnPreview(alloc: std.mem.Allocator, root_dir: []const u8, port: u16) !std.
     return child;
 }
 
+fn openBrowserToIndex(alloc: std.mem.Allocator, port: u16) !void {
+    const url = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}/index.html", .{port});
+    defer alloc.free(url);
+
+    const os = @import("builtin").os.tag;
+    const argv = switch (os) {
+        .windows => &[_][]const u8{ "cmd", "/c", "start", url },
+        .macos => &[_][]const u8{ "open", url },
+        else => &[_][]const u8{ "xdg-open", url },
+    };
+
+    var child = std.process.Child.init(argv, alloc);
+    _ = child.spawn() catch {};
+}
+
 pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     const usage =
-        \\Usage: docz run <path.dcz> [--port <num>] [--css inline|file] [--no-pretty]
+        \\Usage: docz run <path.dcz> [--port <num>] [--css inline|file] [--no-pretty] [--no-live]
         \\Notes:
-        \\  - Writes to a temp out dir and serves it via `docz preview`
-        \\  - Rebuilds on file change. Refresh the browser to see updates.
+        \\  - Compiles to a temp dir and serves it via `docz preview`
+        \\  - Rebuilds + auto-reloads the browser when the .dcz changes
         \\
     ;
 
@@ -6411,6 +7060,7 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     var port: u16 = 5173;
     var css_mode: CssMode = .inline_css;
     var pretty: bool = true;
+    var live_reload: bool = true;
 
     while (it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port")) {
@@ -6433,26 +7083,42 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
             }
         } else if (std.mem.eql(u8, arg, "--no-pretty")) {
             pretty = false;
+        } else if (std.mem.eql(u8, arg, "--no-live")) {
+            live_reload = false;
         } else {
             std.debug.print("run: unknown arg: {s}\n", .{arg});
             return error.Invalid;
         }
     }
 
+    // temp out dir inside zig-cache (portable & disposable)
     const tmp_root = try std.fs.path.join(alloc, &.{ ".zig-cache", "docz-run" });
     defer alloc.free(tmp_root);
     try std.fs.cwd().makePath(tmp_root);
 
-    try generateOnce(alloc, dcz_path, tmp_root, .{ .css_mode = css_mode, .pretty = pretty });
+    // initial build
+    try generateOnce(alloc, dcz_path, tmp_root, .{
+        .css_mode = css_mode,
+        .pretty = pretty,
+        .live_reload = live_reload,
+    });
 
+    // start preview server
     var preview = try spawnPreview(alloc, tmp_root, port);
     defer {
         _ = preview.kill() catch {};
         _ = preview.wait() catch {};
     }
 
-    std.debug.print("Serving on http://localhost:{d}  (dir: {s})\n", .{ port, tmp_root });
+    // open browser directly to the compiled HTML
+    openBrowserToIndex(alloc, port) catch {};
 
+    std.debug.print(
+        "Serving on http://127.0.0.1:{d}  (dir: {s})  [live={any}]\n",
+        .{ port, tmp_root, live_reload },
+    );
+
+    // watch loop (poll .dcz mtime)
     var last = try fileMTime(dcz_path);
     while (true) {
         std.Thread.sleep(250 * std.time.ns_per_ms);
@@ -6460,259 +7126,16 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
         const now = fileMTime(dcz_path) catch continue;
         if (now != last) {
             last = now;
-            generateOnce(alloc, dcz_path, tmp_root, .{ .css_mode = css_mode, .pretty = pretty }) catch |e| {
+            generateOnce(alloc, dcz_path, tmp_root, .{
+                .css_mode = css_mode,
+                .pretty = pretty,
+                .live_reload = live_reload,
+            }) catch |e| {
                 std.debug.print("run: rebuild failed: {s}\n", .{@errorName(e)});
             };
         }
     }
 }
-
-<<<
-
-`spec-inline.html`: >>>
-
-<!DOCTYPE html>
-<html>
-  <head>
-    <meta name="status" content="DRAFT">
-    <meta name="updated" content="2025‑08‑10">
-    <meta name="version" content="0.1.0">
-    <title>Docz Mini‑Spec v0</title>
-    <style>
-      body { font: 16px/1.6 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; }
-      h1,h2,h3 { line-height: 1.25; margin: 1.2em 0 .4em }
-      p { margin: .8em 0 }
-      pre { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 6px; overflow:auto }
-      .math { font-style: italic }
-
-    </style>
-  </head>
-  <body>
-    <h1>Docz Mini‑Spec v0</h1>
-    <p>This is the **single source of truth** for the `.dcz` format for Milestone M0→M1.</p>
-    <p>Everything in core (tokenizer, parser, AST, converters, preview, and plugins) MUST conform to this spec.</p>
-    <p>Spec changes require tests and MUST be documented here before merge.</p>
-    <h2>Scope</h2>
-    <p>This spec defines:</p>
-    <p>- Lexical rules (tokens, escaping).</p>
-    <p>- Block structure (directives, attributes, nesting).</p>
-    <p>- Canonical AST node set and required attributes.</p>
-    <p>- Determinism requirements for round‑trips.</p>
-    <p>- Validation & sanitization rules (MUST/SHOULD).</p>
-    <p>- Diagnostics shape (error categories + spans).</p>
-    <p>It also inventories **planned directives**. Unimplemented directives are marked *PLANNED*; validators SHOULD accept them as unknown-by-core but MAY allow via plugins.</p>
-    <h2>Lexical Rules</h2>
-    <p>Whitespace is UTF‑8. Lines end with `\n`. The tokenizer recognizes:</p>
-    <p>- `@directive` introducer at start of a directive.</p>
-    <p>- Parameter list: `(@-separated attributes)` — see “Attributes”.</p>
-    <p>- `@end` closes a directive block. **Directives MUST be closed** (no implicit closures).</p>
-    <p>- Plain paragraphs are sequences of non-directive lines separated by blank lines.</p>
-    <p>- Code and Math are fenced blocks opened by `@code(...)` / `@math(...)` and closed by `@end`.</p>
-    <p>- Inline escaping inside blocks uses `</p>
-    <p>@`</p>
-    <p>to represent a literal `@`.</p>
-    <p>- Backslash escapes in text are **NOT** interpreted by Docz (left for exporters), except where noted by converters.</p>
-    <h3>Attributes</h3>
-    <p>Attributes are comma‑separated key/value pairs inside `()`:</p>
-    <pre><code>key="string", key2=123, flag=true
-    </code></pre>
-    <p>Rules:</p>
-    <p>- Keys: `[a‑zA‑Z_][a‑zA‑Z0‑9_\-]*`</p>
-    <p>- Values: unquoted numbers/booleans OR quoted strings (`"..."`) with `\"` for quotes, `\\` for backslash.</p>
-    <p>- Ordering is **not significant**; exporters MAY reorder deterministically (lexicographic by key).</p>
-    <h2>Blocks & Directives</h2>
-    <p>A directive has this form:</p>
-    <pre><code>@name(k1="v1", k2=2, flag=true)
-      ...block content...
-    </code></pre>
-    <h3>Core Directives (Implemented)</h3>
-    <p>These MUST be supported by core and round‑trip converters.</p>
-    <pre><code>@meta(...):     Top‑level only. Key/values become document metadata (title, author, version, etc.). No content.
-      @heading(...):  Attributes: level=1..6 (required). Content is inline text on same line after closing ')'. No nested blocks.
-      @code(...):     Attributes: language="" (optional), execute=false (reserved). Content: raw preformatted until @end.
-      @math(...):     Attributes: none (for v0). Content: raw math until @end.
-      @image(...):    Attributes: src (required), width/height (optional strings). No content. (Media)
-      @import(...):   Attributes: href (required), type? (e.g., stylesheet/script). No content.
-      @style(...):    Attributes: freeform. Content is raw (ignored by strict HTML/TeX exporters in v0).
-    </code></pre>
-    <h3>Extended Directives (PLANNED)</h3>
-    <p>Core validator MUST recognize the spelling and basic shape; deeper semantics may be delegated to plugins.</p>
-    <p>Exporters MAY no‑op until implemented.</p>
-    <pre><code>@style-def(...): Define named style tokens; content contains style rules. (PLANNED)
-      @data(...):      Attributes: format=("json"|"yaml"|"csv"|...). Content is raw data. (PLANNED)
-      @plot(...):      Attributes: type, x=, y=, etc.; or content as data block. (PLANNED)
-      @video(...):     Attributes: src, controls=true|false, poster? (PLANNED)
-      @audio(...):     Attributes: src, controls=true|false (PLANNED)
-      @pdf(...):       Attributes: src, page? (PLANNED)
-      @embed(...):     Attributes: type, source, width?, height? (PLANNED)
-      @graph(...):     Attributes: type ("imports"|"links"|...); content lists nodes/edges. (PLANNED)
-      @logic(...):     Attributes: none; content is script to be executed in sandbox (WASM/JS). (PLANNED)
-    </code></pre>
-    <h2>Structural Rules</h2>
-    <p>- Document root is an implicit `Document` node containing a linear list of blocks.</p>
-    <p>- `@meta` nodes MUST appear before any body nodes (order preserved). Multiple `@meta` allowed; last write wins per key.</p>
-    <p>- `@heading(level=n)` is a block header with inline text on the same line: `@heading(level=2) My Title @end`.</p>
-    <p>- `@code` / `@math` / `@data` are multi‑line blocks terminated by `@end`. Content is NOT parsed for nested directives.</p>
-    <p>- `@image`, `@import` are leaf nodes (no content block). They MAY appear anywhere in body.</p>
-    <p>- Unknown directives: core MUST retain them as `Unknown(name, attributes, raw_block?)` for round‑trip safety.</p>
-    <p>- Nesting: v0 forbids nested directives (everything is flat). Future versions MAY allow limited nesting via plugins.</p>
-    <h2>Canonical AST (v0)</h2>
-    <p>Core nodes and required attributes:</p>
-    <pre><code>Document:  children:[Node]
-      Meta:      attrs:{string→string} (title, author, version, ...); no content
-      Heading:   attrs:{level:string}; content:string (inline text)
-      Content:   content:string (paragraph text)
-      CodeBlock: attrs:{language?:string, execute?:bool}; content:string (verbatim)
-      Math:      content:string (verbatim)
-      Media:     attrs:{src:string, kind:"image"|"video"|"audio"|"pdf", width?:string, height?:string}; no content for v0
-      Import:    attrs:{href:string, type?:"stylesheet"|"script"}; no content
-      Style:     attrs:{...}; content:string (opaque)
-      Unknown:   attrs:{...}; name:string; content?:string
-    </code></pre>
-    <p>Mapping from directives to AST:</p>
-    <pre><code>@meta         → Meta
-      @heading      → Heading
-      (plain text)  → Content (paragraphs; blank-line separated)
-      @code         → CodeBlock
-      @math         → Math
-      @image        → Media(kind="image")
-      @video        → Media(kind="video")     (PLANNED → Unknown until implemented)
-      @audio        → Media(kind="audio")     (PLANNED → Unknown until implemented)
-      @pdf          → Media(kind="pdf")       (PLANNED → Unknown until implemented)
-      @import       → Import
-      @style        → Style
-      (others)      → Unknown(name=..., attrs=..., content?)
-    </code></pre>
-    <h2>Determinism & Round‑Trip</h2>
-    <p>- Converters MUST be deterministic given the same AST and options.</p>
-    <p>- Whitespace policy:</p>
-    <p>- Paragraphs normalize trailing whitespace; internal spacing preserved.</p>
-    <p>- Code/Math are preserved verbatim except trimming a trailing `\n\n` may occur during export; importers MUST normalize back.</p>
-    <p>- Attribute order in serialized forms MUST be stable (lexicographic by key).</p>
-    <p>- Unknown nodes MUST be preserved across `dcz → X → dcz` (opaque pass‑through).</p>
-    <h2>Validation Rules (core/validate.zig)</h2>
-    <p>The validator MUST enforce:</p>
-    <pre><code>[GEN]
-      - All directives are closed by @end when required.
-      - No nesting in v0 (report error if a directive appears inside a block content).
-      - Attributes: keys unique per node; values match expected types.
-
-      [META]
-      - Only at top of document until first non-Meta node.
-      - Keys: any string; recommended: title, author, version, keywords, updated.
-
-      [HEADING]
-      - level ∈ {1..6}; content non-empty.
-      - No trailing spaces inside level attribute value.
-
-      [CODE]
-      - language: string (may be empty); execute: boolean (default false).
-      - Content may be empty (allowed).
-
-      [MATH]
-      - Content may be empty (validator MAY warn).
-
-      [MEDIA]
-      - src: non-empty string; width/height if present must be strings (pass-through).
-
-      [IMPORT]
-      - href: non-empty. type optional: "stylesheet"|"script".
-
-      [STYLE]
-      - Opaque: always valid; warn if empty.
-    </code></pre>
-    <p>Failure categories:</p>
-    <pre><code>E100: Unexpected EOF (missing @end)
-      E110: Unknown directive (if strict mode enabled)
-      E120: Disallowed nesting in v0
-      E130: Duplicate attribute key
-      E140: Invalid attribute type/value
-      E150: Meta after body content
-      E160: Missing required attribute
-      W200: Empty content (Math/Style), allowed but questionable
-    </code></pre>
-    <h2>Sanitization Rules (core/sanitize.zig)</h2>
-    <p>Sanitizer SHOULD:</p>
-    <pre><code>- Trim trailing whitespace in paragraph lines.
-      - Normalize consecutive blank lines to a single blank line.
-      - Canonicalize attribute ordering (lexicographic by key).
-      - Clamp heading level into [1,6].
-      - Remove entirely empty nodes (except CodeBlock — keep empty code).
-    </code></pre>
-    <h2>Diagnostics Shape</h2>
-    <p>CLI MUST be able to print human‑readable and JSON forms. JSON schema (minimal v0):</p>
-    <pre><code>{
-      "file": "path/to/doc.dcz",
-      "errors": [
-      {
-      "code": "E160",
-      "message": "Missing required attribute 'level'",
-      "span": { "line": 12, "col": 1, "endLine": 12, "endCol": 20 },
-      "node": "Heading"
-      }
-      ],
-      "warnings": [
-      {
-      "code": "W200",
-      "message": "Empty math block",
-      "span": { "line": 33, "col": 1, "endLine": 35, "endCol": 5 },
-      "node": "Math"
-      }
-      ]
-      }
-    </code></pre>
-    <h2>Compliance Checklist (for PRs)</h2>
-    <p>- [ ] SPEC.dcz updated (this file) with any format/behavior change.</p>
-    <p>- [ ] Unit tests for tokenizer/parser/validators updated.</p>
-    <p>- [ ] Snapshot round‑trip tests updated for md/html/tex.</p>
-    <p>- [ ] Deterministic output verified on all three OSes in CI.</p>
-    <p>- [ ] Diagnostics include accurate spans and codes.</p>
-    <h2>Appendix A: Mini‑Grammar (Informal)</h2>
-    <pre><code>Document    := (Meta | Block | Paragraph)*
-      Meta        := "@meta(" AttrList? ")" WS "@end" NL
-      Heading     := "@heading(" "level=" Int ")" WS InlineText WS "@end" NL
-      CodeBlock   := "@code(" AttrList? ")" NL CodeBody "@end" NL
-      Math        := "@math(" AttrList? ")" NL MathBody "@end" NL
-      Image       := "@image(" AttrList ")" WS "@end" NL
-      Import      := "@import(" AttrList ")" WS "@end" NL
-      Style       := "@style(" AttrList? ")" NL StyleBody "@end" NL
-      Unknown     := "@" Ident "(" AttrList? ")" (NL Body "@end" NL | WS "@end" NL)
-      Paragraph   := TextLine+ NL
-
-      AttrList    := Attr ("," WS Attr)*
-      Attr        := Ident "=" (Number | Bool | String)
-      Ident       := [A-Za-z_][A-Za-z0-9_\-]*
-      Number      := [0-9]+
-      Bool        := "true" | "false"
-      String      := "\"" ( [^"\\] | "\\\"" | "\\\\" )* "\""
-      InlineText  := (not NL, may contain spaces, supports "@@" for literal "@")
-    </code></pre>
-    <h2>Appendix B: Directive Inventory</h2>
-    <p>This table tracks implementation status for core + planned directives (update as features land).</p>
-    <pre><code>name        | status     | ast      | exporter/html | exporter/md | exporter/tex
-      ------------+------------+----------+---------------+-------------+--------------
-      meta        | CORE       | Meta     | head/meta     | front-matter| \title/\author
-      heading     | CORE       | Heading  | <h1..h6>      | #..######    | \sec/\sub..
-      code        | CORE       | CodeBlock| <pre><code>   | ``` ```      | verbatim
-      math        | CORE       | Math     | <div class=..>| $$/$$        | equation
-      image       | CORE       | Media    | <img>         | ![]()        | \includegraphics
-      import      | CORE       | Import   | <link>        | (no-op)      | (no-op)
-      style       | CORE       | Style    | (ignored v0)  | (ignored v0) | (ignored v0)
-      style-def   | PLANNED    | Style    | (tbd)         | (tbd)        | (tbd)
-      data        | PLANNED    | Unknown  | (tbd)         | (tbd)        | (tbd)
-      plot        | PLANNED    | Unknown  | (tbd)         | (tbd)        | (tbd)
-      video       | PLANNED    | Media    | <video>       | (link)       | (no-op)
-      audio       | PLANNED    | Media    | <audio>       | (link)       | (no-op)
-      pdf         | PLANNED    | Media    | (embed)       | (link)       | (no-op)
-      embed       | PLANNED    | Unknown  | (tbd)         | (tbd)        | (tbd)
-      graph       | PLANNED    | Unknown  | (tbd)         | (tbd)        | (tbd)
-      logic       | PLANNED    | Unknown  | (tbd)         | (tbd)        | (tbd)
-    </code></pre>
-    <h2>Versioning</h2>
-    <p>- This file’s `version` field tracks spec compatibility.</p>
-    <p>- Breaking changes bump MINOR while in v0 (0.x). Once stable, follow SemVer (MAJOR.MINOR.PATCH).</p>
-  </body>
-</html>
 
 <<<
 
@@ -7976,7 +8399,7 @@ You are not just writing code—you are **building the future default for docume
 :root { --prose: 70ch }
 body { font: 16px/1.6 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; }
 h1,h2,h3 { line-height: 1.25; margin: 1.2em 0 .4em }
-p { margin: .8em 0}
+p { margin: .8em 0; color: green}
 pre { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 6px; overflow:auto }
 .math { font-style: italic }
 @end

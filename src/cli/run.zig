@@ -1,36 +1,79 @@
 const std = @import("std");
 const docz = @import("docz");
-
 const html_export = @import("html_export");
-// (md/html/tex import/export are available elsewhere; not needed here)
+const common = @import("./common.zig");
 
-const Kind = enum { dcz, md, html, tex };
+// ─────────────────────────────────────────────────────────────
+// Embedded core CSS (always linked first)
+// ─────────────────────────────────────────────────────────────
+const CORE_CSS_BYTES: []const u8 = docz.assets.core_css;
+const CORE_CSS_NAME: []const u8 = "docz.core.css";
+const TAILWIND_CSS_NAME: []const u8 = "docz.tailwind.css";
 
-fn detectKindFromPath(p: []const u8) ?Kind {
-    const ext = std.fs.path.extension(p);
-    if (ext.len == 0) return null;
-    if (std.ascii.eqlIgnoreCase(ext, ".dcz")) return .dcz;
-    if (std.ascii.eqlIgnoreCase(ext, ".md")) return .md;
-    if (std.ascii.eqlIgnoreCase(ext, ".html") or std.ascii.eqlIgnoreCase(ext, ".htm")) return .html;
-    if (std.ascii.eqlIgnoreCase(ext, ".tex")) return .tex;
-    return null;
+// --------- Live reload helpers (poll file) ---------
+
+const LIVE_MARKER = "__docz_hot.txt";
+
+fn writeHotMarker(alloc: std.mem.Allocator, out_dir: []const u8) !void {
+    const path = try std.fs.path.join(alloc, &.{ out_dir, LIVE_MARKER });
+    defer alloc.free(path);
+
+    // Hash a timestamp to a u64 seed (portable across Zig versions)
+    const t: i128 = std.time.nanoTimestamp();
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(std.mem.asBytes(&t));
+    const seed: u64 = hasher.final();
+
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random().int(u64);
+
+    const payload = try std.fmt.allocPrint(alloc, "{d}-{x}\n", .{ std.time.milliTimestamp(), r });
+    defer alloc.free(payload);
+
+    try common.writeFile(path, payload);
 }
 
-fn readFileAlloc(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
-    var f = try std.fs.cwd().openFile(path, .{});
-    defer f.close();
-    return try f.readToEndAlloc(alloc, 1 << 26);
-}
+fn injectLiveScript(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
+    const script =
+        \\<script>
+        \\(function(){
+        \\  var URL = "__DOCZ_HOT__";
+        \\  var last = null;
+        \\  function tick(){
+        \\    fetch(URL, {cache: 'no-store'}).then(function(r){return r.text()}).then(function(t){
+        \\      if (last === null) last = t;
+        \\      else if (t !== last) location.reload();
+        \\    }).catch(function(_){}).finally(function(){ setTimeout(tick, 500); });
+        \\  }
+        \\  tick();
+        \\})();
+        \\</script>
+        \\
+    ;
 
-fn writeFile(path: []const u8, data: []const u8) !void {
-    const cwd = std.fs.cwd();
-    if (std.fs.path.dirname(path)) |dirpart| {
-        try cwd.makePath(dirpart);
+    const idx_opt = std.mem.indexOf(u8, html, "</body>");
+    const tag = try std.fmt.allocPrint(alloc, "{s}", .{script});
+    defer alloc.free(tag);
+
+    const with_url = try std.mem.replaceOwned(u8, alloc, tag, "__DOCZ_HOT__", LIVE_MARKER);
+    errdefer alloc.free(with_url);
+
+    if (idx_opt) |idx| {
+        var out = std.ArrayList(u8).init(alloc);
+        errdefer out.deinit();
+        try out.appendSlice(html[0..idx]);
+        try out.appendSlice(with_url);
+        try out.appendSlice(html[idx..]);
+        return out.toOwnedSlice();
     }
-    var f = try cwd.createFile(path, .{ .truncate = true });
-    defer f.close();
-    try f.writeAll(data);
+
+    // Fallback: append at end if no </body>
+    return std.fmt.allocPrint(alloc, "{s}\n{s}", .{ html, with_url });
 }
+
+const CssMode = enum { inline_css, file };
+
+const GenerateOpts = struct { css_mode: CssMode = .inline_css, pretty: bool = true, live_reload: bool = true, css_file_name: []const u8 = "docz.css" };
 
 fn insertCssLinkBeforeHeadClose(alloc: std.mem.Allocator, html: []const u8, href: []const u8) ![]u8 {
     const needle = "</head>";
@@ -39,6 +82,7 @@ fn insertCssLinkBeforeHeadClose(alloc: std.mem.Allocator, html: []const u8, href
         return try std.fmt.allocPrint(alloc, "<link rel=\"stylesheet\" href=\"{s}\">\n{s}", .{ href, html });
     }
     const idx = idx_opt.?;
+
     var out = std.ArrayList(u8).init(alloc);
     errdefer out.deinit();
 
@@ -51,7 +95,7 @@ fn insertCssLinkBeforeHeadClose(alloc: std.mem.Allocator, html: []const u8, href
     return out.toOwnedSlice();
 }
 
-// --- tiny pretty printer (unchanged) ---
+// --- tiny pretty printer (unchanged logic) ---
 fn prettyHtml(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
     var out = std.ArrayList(u8).init(alloc);
     errdefer out.deinit();
@@ -121,75 +165,110 @@ fn prettyHtml(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
     return out.toOwnedSlice();
 }
 
-// --------- Live reload helpers (poll file) ---------
+// ─────────────────────────────────────────────────────────────
+// Tailwind discovery + copy into out_dir if present
+// ─────────────────────────────────────────────────────────────
 
-const LIVE_MARKER = "__docz_hot.txt";
-
-fn writeHotMarker(alloc: std.mem.Allocator, out_dir: []const u8) !void {
-    const path = try std.fs.path.join(alloc, &.{ out_dir, LIVE_MARKER });
-    defer alloc.free(path);
-
-    // Hash the i128 timestamp to a u64 seed (portable across Zig versions)
-    const t: i128 = std.time.nanoTimestamp();
-    var hasher = std.hash.Wyhash.init(0);
-    hasher.update(std.mem.asBytes(&t));
-    const seed: u64 = hasher.final();
-
-    var prng = std.Random.DefaultPrng.init(seed);
-    const r = prng.random().int(u64);
-
-    const payload = try std.fmt.allocPrint(alloc, "{d}-{x}\n", .{ std.time.milliTimestamp(), r });
-    defer alloc.free(payload);
-
-    try writeFile(path, payload);
+/// Return true if `cand` should replace `best_name` using a lexicographic tie-breaker.
+/// We prefer the lexicographically *later* name (e.g., "2.1.0" beats "2.0.9").
+/// If `have_best` is false, any candidate wins.
+fn lexCandidateBeatsCurrent(have_best: bool, best_name: []const u8, cand: []const u8) bool {
+    return (!have_best) or std.mem.lessThan(u8, best_name, cand);
 }
 
-fn injectLiveScript(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
-    const script =
-        \\<script>
-        \\(function(){
-        \\  var URL = "__DOCZ_HOT__";
-        \\  var last = null;
-        \\  function tick(){
-        \\    fetch(URL, {cache: 'no-store'}).then(function(r){return r.text()}).then(function(t){
-        \\      if (last === null) last = t;
-        \\      else if (t !== last) location.reload();
-        \\    }).catch(function(_){}).finally(function(){ setTimeout(tick, 500); });
-        \\  }
-        \\  tick();
-        \\})();
-        \\</script>
-        \\
-    ;
+/// Find the best Tailwind theme CSS on disk:
+///   third_party/tailwind/<version>/css/docz.tailwind.css
+/// Preference: newest by directory mtime; fall back to lexicographic order.
+/// Returns an owned path slice (caller must `alloc.free`) or null if not found.
+pub fn tailwindSourceCssPath(alloc: std.mem.Allocator) !?[]u8 {
+    const family_dir = "third_party/tailwind";
 
-    const idx_opt = std.mem.indexOf(u8, html, "</body>");
-    const tag = try std.fmt.allocPrint(alloc, "{s}", .{script});
-    defer alloc.free(tag);
+    var fam = std.fs.cwd().openDir(family_dir, .{ .iterate = true }) catch |e| switch (e) {
+        error.FileNotFound => return null,
+        else => return e,
+    };
+    defer fam.close();
 
-    const with_url = try std.mem.replaceOwned(u8, alloc, tag, "__DOCZ_HOT__", LIVE_MARKER);
-    errdefer alloc.free(with_url);
+    var it = fam.iterate();
 
-    if (idx_opt) |idx| {
-        var out = std.ArrayList(u8).init(alloc);
-        errdefer out.deinit();
-        try out.appendSlice(html[0..idx]);
-        try out.appendSlice(with_url);
-        try out.appendSlice(html[idx..]);
-        return out.toOwnedSlice();
+    var have_best = false;
+    var best_name: []u8 = &[_]u8{};
+    var best_mtime: i128 = 0;
+
+    while (try it.next()) |ent| {
+        if (ent.kind != .directory) continue;
+        if (ent.name.len == 0 or ent.name[0] == '.') continue;
+
+        const dir_abs = try std.fs.path.join(alloc, &.{ family_dir, ent.name });
+        defer alloc.free(dir_abs);
+
+        const css_abs = try std.fs.path.join(alloc, &.{ dir_abs, "css", "docz.tailwind.css" });
+        defer alloc.free(css_abs);
+
+        // access(): success => void; errors => error set. Convert to bool explicitly.
+        const present = blk: {
+            std.fs.cwd().access(css_abs, .{}) catch break :blk false;
+            break :blk true;
+        };
+        if (!present) continue;
+
+        // Prefer by mtime; if stat fails, use lexicographic tie-breaker.
+        const st = std.fs.cwd().statFile(dir_abs) catch |e| switch (e) {
+            error.FileNotFound, error.AccessDenied => {
+                if (lexCandidateBeatsCurrent(have_best, best_name, ent.name)) {
+                    if (have_best) alloc.free(best_name);
+                    best_name = try alloc.dupe(u8, ent.name);
+                    have_best = true;
+                }
+                continue;
+            },
+            else => return e,
+        };
+
+        const m = st.mtime;
+        if (!have_best or m > best_mtime) {
+            if (have_best) alloc.free(best_name);
+            best_name = try alloc.dupe(u8, ent.name);
+            best_mtime = m;
+            have_best = true;
+        }
     }
 
-    // Fallback: append at end if no </body>
-    return std.fmt.allocPrint(alloc, "{s}\n{s}", .{ html, with_url });
+    if (!have_best) return null;
+
+    const final_path = try std.fs.path.join(alloc, &.{ family_dir, best_name, "css", "docz.tailwind.css" });
+    alloc.free(best_name);
+
+    // Double-check presence
+    const ok = blk: {
+        std.fs.cwd().access(final_path, .{}) catch break :blk false;
+        break :blk true;
+    };
+    if (!ok) {
+        alloc.free(final_path);
+        return null;
+    }
+    return final_path;
 }
 
-const CssMode = enum { inline_css, file };
+fn copyFileStreaming(src_abs: []const u8, dest_abs: []const u8) !void {
+    if (std.fs.path.dirname(dest_abs)) |d| try std.fs.cwd().makePath(d);
 
-const GenerateOpts = struct {
-    css_mode: CssMode = .inline_css,
-    pretty: bool = true,
-    live_reload: bool = true,
-    css_file_name: []const u8 = "docz.css",
-};
+    var in_file = try std.fs.cwd().openFile(src_abs, .{});
+    defer in_file.close();
+
+    var out_file = try std.fs.cwd().createFile(dest_abs, .{ .truncate = true });
+    defer out_file.close();
+
+    var buf: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = try in_file.read(&buf);
+        if (n == 0) break;
+        try out_file.writeAll(buf[0..n]);
+    }
+}
+
+// --------- generation (once) ---------
 
 fn generateOnce(
     alloc: std.mem.Allocator,
@@ -197,10 +276,10 @@ fn generateOnce(
     out_dir: []const u8,
     opts: GenerateOpts,
 ) !void {
-    const input = try readFileAlloc(alloc, dcz_path);
+    const input = try common.readFileAlloc(alloc, dcz_path);
     defer alloc.free(input);
 
-    const kind = detectKindFromPath(dcz_path) orelse return error.Unsupported;
+    const kind = common.detectKindFromPath(dcz_path) orelse return error.Unsupported;
     if (kind != .dcz) return error.ExpectedDcz;
 
     // DCZ -> AST
@@ -218,14 +297,27 @@ fn generateOnce(
 
     var final_html: []u8 = html_inline;
 
+    // ── Core CSS: write and link FIRST
+    {
+        const core_out = try std.fs.path.join(alloc, &.{ out_dir, CORE_CSS_NAME });
+        defer alloc.free(core_out);
+        try common.writeFile(core_out, CORE_CSS_BYTES);
+
+        const linked_core = try insertCssLinkBeforeHeadClose(alloc, final_html, CORE_CSS_NAME);
+        alloc.free(final_html);
+        final_html = linked_core;
+    }
+
+    // ── If exporting to an external stylesheet, write & link it SECOND (after core)
     if (opts.css_mode == .file) {
         const css_blob = try html_export.collectInlineCss(&ast, alloc);
         defer alloc.free(css_blob);
 
         const css_out = try std.fs.path.join(alloc, &.{ out_dir, opts.css_file_name });
         defer alloc.free(css_out);
-        try writeFile(css_out, css_blob);
+        try common.writeFile(css_out, css_blob);
 
+        // Strip inline <style> from HTML, then link external
         const no_style = try html_export.stripFirstStyleBlock(final_html, alloc);
         alloc.free(final_html);
         final_html = no_style;
@@ -233,6 +325,18 @@ fn generateOnce(
         const linked = try insertCssLinkBeforeHeadClose(alloc, final_html, opts.css_file_name);
         alloc.free(final_html);
         final_html = linked;
+    }
+
+    // ── Tailwind (vendored) THIRD: copy to out_dir and link last if available
+    if (try tailwindSourceCssPath(alloc)) |src_tw| {
+        defer alloc.free(src_tw);
+        const tw_out = try std.fs.path.join(alloc, &.{ out_dir, TAILWIND_CSS_NAME });
+        defer alloc.free(tw_out);
+        try copyFileStreaming(src_tw, tw_out);
+
+        const linked_tw = try insertCssLinkBeforeHeadClose(alloc, final_html, TAILWIND_CSS_NAME);
+        alloc.free(final_html);
+        final_html = linked_tw;
     }
 
     if (opts.live_reload) {
@@ -250,7 +354,7 @@ fn generateOnce(
     const html_out = try std.fs.path.join(alloc, &.{ out_dir, "index.html" });
     defer alloc.free(html_out);
 
-    try writeFile(html_out, final_html);
+    try common.writeFile(html_out, final_html);
     alloc.free(final_html);
 
     // Update hot marker last (so the browser only reloads when the new HTML is fully written)
@@ -304,9 +408,13 @@ fn openBrowserToIndex(alloc: std.mem.Allocator, port: u16) !void {
     _ = child.spawn() catch {};
 }
 
+// -----------------------------------------------------------------------------
+// CLI
+// -----------------------------------------------------------------------------
+
 pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     const usage =
-        \\Usage: docz run <path.dcz> [--port <num>] [--css inline|file] [--no-pretty] [--no-live]
+        \\Usage: docz run <path.dcz> [--port <num>] [--css inline|file] [--no-pretty] [--no-live] [--config <file>]
         \\Notes:
         \\  - Compiles to a temp dir and serves it via `docz preview`
         \\  - Rebuilds + auto-reloads the browser when the .dcz changes
@@ -318,7 +426,16 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
         return error.Invalid;
     };
 
-    var port: u16 = 5173;
+    // Defaults, optionally from config file
+    var cfg_path: ?[]const u8 = null;
+    var port_overridden = false;
+
+    var settings = common.Settings{}; // defaults
+    // If config exists by default, load it (we only use the port here)
+    settings = common.loadSettings(alloc, null) catch settings;
+
+    var port: u16 = settings.port; // defaults to 5173 if no config
+
     var css_mode: CssMode = .inline_css;
     var pretty: bool = true;
     var live_reload: bool = true;
@@ -333,6 +450,7 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
                 std.debug.print("run: invalid port: {s}\n", .{v});
                 return error.Invalid;
             };
+            port_overridden = true;
         } else if (std.mem.eql(u8, arg, "--css")) {
             const v = it.next() orelse {
                 std.debug.print("run: --css requires a value: inline|file\n", .{});
@@ -346,6 +464,15 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
             pretty = false;
         } else if (std.mem.eql(u8, arg, "--no-live")) {
             live_reload = false;
+        } else if (std.mem.eql(u8, arg, "--config")) {
+            const v = it.next() orelse {
+                std.debug.print("run: --config requires a value\n", .{});
+                return error.Invalid;
+            };
+            cfg_path = v;
+            const s2 = common.loadSettings(alloc, cfg_path) catch settings;
+            settings = s2;
+            if (!port_overridden) port = settings.port;
         } else {
             std.debug.print("run: unknown arg: {s}\n", .{arg});
             return error.Invalid;

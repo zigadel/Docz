@@ -2,7 +2,104 @@ const std = @import("std");
 const ASTNode = @import("../parser/ast.zig").ASTNode;
 const NodeType = @import("../parser/ast.zig").NodeType;
 
-// ---- helpers ----
+// -----------------------------------------------------------------------------
+// Asset options + VENDOR.lock reader
+// -----------------------------------------------------------------------------
+
+pub const RenderAssets = struct {
+    enable_katex: bool = true,
+    enable_tailwind: bool = true,
+    third_party_root: []const u8 = "third_party",
+};
+
+fn readFileAlloc(alloc: std.mem.Allocator, path: []const u8, max: usize) ![]u8 {
+    var f = try std.fs.cwd().openFile(path, .{});
+    defer f.close();
+    return try f.readToEndAlloc(alloc, max);
+}
+
+/// Very small JSON helper: find string value for a top-level key, assuming
+/// a simple object like: {"katex":"0.16.11","tailwind":"docz-theme-1.0.0"}
+/// This intentionally avoids std.json for stability across Zig versions.
+fn findJsonStringValue(buf: []const u8, key: []const u8) ?[]const u8 {
+    // Look for "key"
+    var pat_buf: [128]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&pat_buf);
+    const A = fba.allocator();
+    const quoted_key = std.fmt.allocPrint(A, "\"{s}\"", .{key}) catch return null;
+
+    const key_i = std.mem.indexOf(u8, buf, quoted_key) orelse return null;
+
+    // Find colon after key
+    var i: usize = key_i + quoted_key.len;
+    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+    if (i >= buf.len or buf[i] != ':') return null;
+    i += 1;
+
+    // Find opening quote of the value
+    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+    if (i >= buf.len or buf[i] != '"') return null;
+    i += 1; // start of value
+
+    const start = i;
+    // Find closing quote (no escape handling needed for plain versions/labels)
+    while (i < buf.len and buf[i] != '"') : (i += 1) {}
+    if (i >= buf.len) return null;
+
+    return buf[start..i];
+}
+
+fn readVendorLock(alloc: std.mem.Allocator, third_party_root: []const u8) !struct {
+    katex: ?[]const u8,
+    tailwind: ?[]const u8,
+} {
+    const lock_path = try std.fs.path.join(alloc, &.{ third_party_root, "VENDOR.lock" });
+    defer alloc.free(lock_path);
+
+    const buf = readFileAlloc(alloc, lock_path, 1 << 16) catch |e| {
+        if (e == error.FileNotFound) return .{ .katex = null, .tailwind = null };
+        return e;
+    };
+    defer alloc.free(buf);
+
+    const k = findJsonStringValue(buf, "katex");
+    const t = findJsonStringValue(buf, "tailwind");
+
+    return .{
+        .katex = if (k) |s| try alloc.dupe(u8, s) else null,
+        .tailwind = if (t) |s| try alloc.dupe(u8, s) else null,
+    };
+}
+
+/// Emit <link>/<script> tags for vendored assets based on VENDOR.lock.
+pub fn emitHeadAssets(alloc: std.mem.Allocator, w: anytype, opts: RenderAssets) !void {
+    const lock = try readVendorLock(alloc, opts.third_party_root);
+    defer if (lock.katex) |s| alloc.free(s);
+    defer if (lock.tailwind) |s| alloc.free(s);
+
+    if (opts.enable_tailwind) {
+        if (lock.tailwind) |ver| {
+            try w.print(
+                "<link rel=\"stylesheet\" href=\"/third_party/tailwind/docz-theme-{s}/css/docz.tailwind.css\"/>\n",
+                .{ver},
+            );
+        }
+    }
+    if (opts.enable_katex) {
+        if (lock.katex) |ver| {
+            try w.print(
+                \\<link rel="stylesheet" href="/third_party/katex/{s}/dist/katex.min.css"/>
+                \\<script defer src="/third_party/katex/{s}/dist/katex.min.js"></script>
+                \\
+            , .{ ver, ver });
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Existing helpers (kept)
+// -----------------------------------------------------------------------------
+
 fn lessStr(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, a, b);
 }
@@ -85,6 +182,10 @@ fn buildGlobalCSS(styleContent: []const u8, allocator: std.mem.Allocator) ![]u8 
     return builder.toOwnedSlice();
 }
 
+// -----------------------------------------------------------------------------
+// Renderer
+// -----------------------------------------------------------------------------
+
 pub fn renderHTML(root: *const ASTNode, allocator: std.mem.Allocator) ![]u8 {
     var list = std.ArrayList(u8).init(allocator);
     const writer = list.writer();
@@ -107,7 +208,7 @@ pub fn renderHTML(root: *const ASTNode, allocator: std.mem.Allocator) ![]u8 {
         }
     }
 
-    // Global CSS
+    // Global CSS (from Style nodes in "global" mode)
     var globalCSSBuilder = std.ArrayList(u8).init(allocator);
     const globalWriter = globalCSSBuilder.writer();
 
@@ -127,6 +228,10 @@ pub fn renderHTML(root: *const ASTNode, allocator: std.mem.Allocator) ![]u8 {
         try writer.print("<style>\n{s}</style>\n", .{globalCSSBuilder.items});
     }
     globalCSSBuilder.deinit();
+
+    // Vendored assets (Tailwind / KaTeX), read from VENDOR.lock if present.
+    // Defaults: enabled. Can be overridden later via CLI/config to disable.
+    try emitHeadAssets(allocator, writer, .{});
 
     try writer.print("</head>\n<body>\n", .{});
 
@@ -178,7 +283,7 @@ pub fn renderHTML(root: *const ASTNode, allocator: std.mem.Allocator) ![]u8 {
 }
 
 // ----------------------
-// ✅ Tests
+// ✅ Tests (unchanged)
 // ----------------------
 
 test "Render HTML with inline style" {
