@@ -21,7 +21,7 @@ fn htmlEscape(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
     return out.toOwnedSlice();
 }
 
-fn flushParagraph(p: *std.ArrayList(u8), out: *std.ArrayList[u8]) !void {
+fn flushParagraph(p: *std.ArrayList(u8), out: *std.ArrayList(u8)) !void {
     if (p.items.len == 0) return;
     try out.appendSlice("<p>");
     try out.appendSlice(p.items);
