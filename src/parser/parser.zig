@@ -4,7 +4,8 @@ const TokenType = @import("tokenizer.zig").TokenType;
 const ASTNode = @import("ast.zig").ASTNode;
 const NodeType = @import("ast.zig").NodeType;
 
-/// Maps a directive string (e.g. "@meta") to a NodeType
+/// Maps a directive string (e.g. "@meta") to a NodeType.
+/// Includes simple aliases like "@css" → Style.
 fn directiveToNodeType(directive: []const u8) NodeType {
     if (std.mem.eql(u8, directive, "@meta")) return NodeType.Meta;
     if (std.mem.eql(u8, directive, "@heading")) return NodeType.Heading;
@@ -14,17 +15,17 @@ fn directiveToNodeType(directive: []const u8) NodeType {
     if (std.mem.eql(u8, directive, "@import")) return NodeType.Import;
     if (std.mem.eql(u8, directive, "@style")) return NodeType.Style;
 
-    // NEW:
-    if (std.mem.eql(u8, directive, "@css")) return NodeType.Css;
+    // Aliases / planned:
+    if (std.mem.eql(u8, directive, "@css")) return NodeType.Style; // alias of style
     if (std.mem.eql(u8, directive, "@style-def")) return NodeType.StyleDef;
 
-    // Fallback: treat as paragraph-ish content (unknown-by-core can be upgraded later)
+    // Fallback: treat as generic content; unknowns can be upgraded later
     return NodeType.Content;
 }
 
 fn isBlockDirective(nt: NodeType) bool {
     return switch (nt) {
-        .CodeBlock, .Math, .Style, .Css, .StyleDef => true, // NEW: Css, StyleDef
+        .CodeBlock, .Math, .Style, .Css, .StyleDef => true,
         else => false,
     };
 }
@@ -48,14 +49,14 @@ pub fn parse(tokens: []const Token, allocator: std.mem.Allocator) !ASTNode {
                 i += 2;
             }
 
-            // inline content (e.g. heading title)
+            // inline content (e.g. heading title after ")")
             if (i < tokens.len and tokens[i].kind == .Content) {
                 node.content = tokens[i].lexeme; // not owned
                 node.owns_content = false;
                 i += 1;
             }
 
-            // block content only for block directives
+            // block body for fenced directives
             if (isBlockDirective(node_type)) {
                 var block = std.ArrayList(u8).init(allocator);
                 defer block.deinit();

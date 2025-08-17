@@ -14,37 +14,37 @@ pub const Token = struct {
     is_allocated: bool = false, // track ownership for @@ case
 };
 
-/// True iff there is a directive introducer at position `i`.
-/// A directive must start at the beginning of the file or immediately after '\n',
-/// and be followed by an alphabetic name (e.g. "@meta", "@end").
-fn isDirectiveStart(input: []const u8, i: usize) bool {
-    if (i >= input.len) return false;
-    if (input[i] != '@') return false;
-    if (i > 0 and input[i - 1] != '\n') return false;
-    if (i + 1 >= input.len) return false;
-    return std.ascii.isAlphabetic(input[i + 1]);
-}
+/// Optional config (reserved for future knobs).
+/// Use `tokenize()` for the default behavior; use `tokenizeWith()` if/when
+/// you want to expose options without changing the public signature.
+pub const TokenizerConfig = struct {
+    /// Directives (with leading '@') that start a fenced raw block.
+    fenced_directives: []const []const u8 = &.{ "@code", "@math", "@style", "@css" },
 
-/// Return index of end-of-line (position of '\n' or input.len).
-fn lineEnd(input: []const u8, pos: usize) usize {
-    var j = pos;
-    while (j < input.len and input[j] != '\n') : (j += 1) {}
-    return j;
-}
+    pub fn isFenced(self: *const TokenizerConfig, dir: []const u8) bool {
+        for (self.fenced_directives) |d| {
+            if (std.mem.eql(u8, d, dir)) return true;
+        }
+        return false;
+    }
+};
 
-/// Compare slice (trimmed of spaces/tabs/CR) with needle.
-fn trimmedEq(slice: []const u8, needle: []const u8) bool {
-    const t = std.mem.trim(u8, slice, " \t\r");
-    return std.mem.eql(u8, t, needle);
-}
-
-/// Tokenize `.dcz` input into an array of tokens.
-/// Caller owns returned slice; must free allocated lexemes where `is_allocated=true`.
+/// Public, backward-compatible API used across the repo/tests.
 pub fn tokenize(input: []const u8, allocator: std.mem.Allocator) ![]Token {
+    return tokenizeWith(input, allocator, .{});
+}
+
+/// Extended API (kept internal for now) that accepts options.
+pub fn tokenizeWith(input: []const u8, allocator: std.mem.Allocator, config: TokenizerConfig) ![]Token {
     var tokens = std.ArrayList(Token).init(allocator);
     errdefer tokens.deinit();
 
     var i: usize = 0;
+
+    // Skip UTF-8 BOM if present
+    if (input.len >= 3 and input[0] == 0xEF and input[1] == 0xBB and input[2] == 0xBF) {
+        i = 3;
+    }
 
     // Fence state: when non-empty, we are inside a raw block until a line that is "@end"
     // or ends with "@end" (after optional whitespace).
@@ -78,7 +78,7 @@ pub fn tokenize(input: []const u8, allocator: std.mem.Allocator) ![]Token {
                 }
             }
 
-            // NEW: for math blocks only, strip leading indentation on the first content line.
+            // Optional heuristic: for math blocks only, strip leading indentation on the first content line.
             if (std.mem.eql(u8, fence_name, "@math")) {
                 while (i < input.len and (input[i] == ' ' or input[i] == '\t')) : (i += 1) {}
             }
@@ -173,8 +173,12 @@ pub fn tokenize(input: []const u8, allocator: std.mem.Allocator) ![]Token {
                 const d_start = i;
                 i += 1; // skip '@'
 
-                while (i < input.len and std.ascii.isAlphabetic(input[i])) : (i += 1) {}
-                const directive_full = input[d_start..i]; // e.g. "@meta", "@code", "@heading"
+                // Allow letters, digits, '_' and '-' in directive identifiers.
+                while (i < input.len) : (i += 1) {
+                    const ch = input[i];
+                    if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-')) break;
+                }
+                const directive_full = input[d_start..i]; // e.g. "@meta", "@style-def"
 
                 if (directive_full.len == 1) {
                     try tokens.append(.{ .kind = .Content, .lexeme = "@" });
@@ -209,12 +213,16 @@ pub fn tokenize(input: []const u8, allocator: std.mem.Allocator) ![]Token {
                             continue;
                         }
 
-                        // key
+                        // key: allow letters, digits, '_' and '-' (to match directive style)
                         const key_start = i;
-                        while (i < input.len and std.ascii.isAlphabetic(input[i])) : (i += 1) {}
+                        while (i < input.len) : (i += 1) {
+                            const ch = input[i];
+                            if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-')) break;
+                        }
                         if (i > key_start) {
                             try tokens.append(.{ .kind = .ParameterKey, .lexeme = input[key_start..i] });
                         } else {
+                            // skip one char to avoid infinite loop if malformed
                             if (i < input.len and input[i] != ')' and input[i] != ',') i += 1;
                             continue;
                         }
@@ -226,7 +234,9 @@ pub fn tokenize(input: []const u8, allocator: std.mem.Allocator) ![]Token {
                             if (i < input.len and input[i] == '"') {
                                 i += 1; // opening quote
                                 const str_start = i;
-                                while (i < input.len and input[i] != '"') : (i += 1) {}
+                                while (i < input.len) : (i += 1) {
+                                    if (input[i] == '"') break;
+                                }
                                 const str_end = if (i < input.len) i else input.len;
                                 try tokens.append(.{ .kind = .ParameterValue, .lexeme = input[str_start..str_end] });
                                 if (i < input.len and input[i] == '"') i += 1;
@@ -245,11 +255,8 @@ pub fn tokenize(input: []const u8, allocator: std.mem.Allocator) ![]Token {
                     if (i < input.len and input[i] == ')') i += 1;
                 }
 
-                // Fence-opening directives for v0
-                if (std.mem.eql(u8, directive_full, "@code") or
-                    std.mem.eql(u8, directive_full, "@math") or
-                    std.mem.eql(u8, directive_full, "@style"))
-                {
+                // Fence-opening directives (configurable)
+                if (config.isFenced(directive_full)) {
                     fence_name = directive_full; // any non-empty marker works
                 }
 
@@ -304,6 +311,21 @@ pub fn freeTokens(allocator: std.mem.Allocator, tokens: []Token) void {
     for (tokens) |t| {
         if (t.is_allocated) allocator.free(t.lexeme);
     }
+}
+
+// ── helpers ─────────────────────────────────────────────────
+
+/// Return index of end-of-line (position of '\n' or input.len).
+fn lineEnd(input: []const u8, pos: usize) usize {
+    var j = pos;
+    while (j < input.len and j < input.len and input[j] != '\n') : (j += 1) {}
+    return j;
+}
+
+/// Compare slice (trimmed of spaces/tabs/CR) with needle.
+fn trimmedEq(slice: []const u8, needle: []const u8) bool {
+    const t = std.mem.trim(u8, slice, " \t\r");
+    return std.mem.eql(u8, t, needle);
 }
 
 // ----------------------
@@ -398,4 +420,61 @@ test "Inline `@end` in prose does not become BlockEnd (outside fence)" {
     }
     try std.testing.expect(found_inline);
     try std.testing.expect(found_blockend);
+}
+
+test "Alias @css fences like @style" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    const input =
+        \\@css()
+        \\p { color: green }
+        \\@end
+    ;
+
+    const toks = try tokenize(input, A);
+    defer {
+        freeTokens(A, toks);
+        A.free(toks);
+    }
+
+    // Expect: Directive(@css), params, Content, BlockEnd
+    var saw_content = false;
+    var saw_blockend = false;
+    for (toks) |t| {
+        if (t.kind == .Content and std.mem.indexOf(u8, t.lexeme, "color: green") != null) saw_content = true;
+        if (t.kind == .BlockEnd) saw_blockend = true;
+    }
+    try std.testing.expect(saw_content);
+    try std.testing.expect(saw_blockend);
+}
+
+test "Directive names and param keys may contain '-'" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    const input =
+        \\@style-def(theme-name="default")
+        \\.x{}
+        \\@end
+    ;
+
+    const toks = try tokenize(input, A);
+    defer {
+        freeTokens(A, toks);
+        A.free(toks);
+    }
+
+    // First token should be a Directive whose lexeme includes "@style-def"
+    try std.testing.expect(toks.len >= 3);
+    try std.testing.expect(toks[0].kind == .Directive);
+    try std.testing.expect(std.mem.eql(u8, toks[0].lexeme, "@style-def"));
+    // ParameterKey should include '-'
+    var saw_key = false;
+    for (toks) |t| {
+        if (t.kind == .ParameterKey and std.mem.eql(u8, t.lexeme, "theme-name")) saw_key = true;
+    }
+    try std.testing.expect(saw_key);
 }

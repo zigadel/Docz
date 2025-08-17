@@ -71,7 +71,7 @@ The `run` subcommand compiles `.dcz` to a temporary directory and launches the b
 zig build run -- run ./docs/SPEC.dcz
 @end
 
-The preview server exposes a small set of routes (used internally by the CLI and tests):
+The @style(class="color = red;) preview @end server exposes a small set of routes (used internally by the CLI and tests):
 
 - `/view?path=docs/SPEC.dcz` — render a full HTML page
 - `/render?path=docs/SPEC.dcz` — render body fragment

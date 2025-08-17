@@ -178,7 +178,7 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
 }
 
 fn openBrowser(alloc: std.mem.Allocator, port: u16, path: []const u8) !void {
-    const url = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}/view?path={s}", .{ port, path });
+    const url = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}/{s}", .{ port, path });
     defer alloc.free(url);
 
     const os = @import("builtin").os.tag;

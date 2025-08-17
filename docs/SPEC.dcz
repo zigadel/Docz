@@ -1,6 +1,6 @@
 @meta(title="Docz Mini‑Spec v0", version="0.1.0", status="DRAFT", updated="2025‑08‑10") @end
 
-@css()
+@style()
 :root { --prose: 70ch }
 body { font: 16px/1.6 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; }
 h1,h2,h3 { line-height: 1.25; margin: 1.2em 0 .4em }

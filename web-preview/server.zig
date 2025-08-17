@@ -5,10 +5,8 @@ const hot = @import("hot_reload.zig");
 const Tokenizer = @import("../src/parser/tokenizer.zig");
 const Parser = @import("../src/parser/parser.zig");
 const Renderer = @import("../src/renderer/html.zig");
-const HtmlExport = @import("html_export");
 
 fn decU64(n: u64, buf: *[24]u8) []const u8 {
-    // Fast, no-heap decimal formatting suitable for HTTP headers.
     return std.fmt.bufPrint(buf, "{d}", .{n}) catch unreachable;
 }
 
@@ -39,7 +37,6 @@ pub const PreviewServer = struct {
 
         std.debug.print("🔎 web-preview listening on http://127.0.0.1:{d}\n", .{port});
 
-        // (Optional) background watcher — harmless if the file doesn't exist.
         _ = try std.Thread.spawn(.{}, pollFileAndBroadcast, .{ &self.broadcaster, "docs/SPEC.dcz", 250 });
 
         while (true) {
@@ -57,7 +54,6 @@ pub const PreviewServer = struct {
             const path = req.head.target;
             const bare_path = stripQuery(path);
 
-            // Silence hot marker + favicon noise
             const is_hot = std.mem.eql(u8, bare_path, "/__docz_hot.txt");
             const is_favicon = std.mem.eql(u8, bare_path, "/favicon.ico");
             if (!is_hot and !is_favicon) {
@@ -80,8 +76,7 @@ pub const PreviewServer = struct {
         const path = req.head.target;
 
         if (std.mem.startsWith(u8, path, "/third_party/")) {
-            // Strip the leading slash and serve from repo root
-            const rel = path[1..]; // "third_party/…"
+            const rel = path[1..];
             std.debug.print("  route=third_party hit={s}\n", .{rel});
             return self.serveFile(req, rel);
         }
@@ -125,7 +120,6 @@ pub const PreviewServer = struct {
         defer self.allocator.free(safe_rel);
 
         if (safe_rel.len == 0 or std.mem.eql(u8, safe_rel, ".")) {
-            // index shell that redirects to /view?path=...
             return self.serveIndex(req);
         }
 
@@ -151,7 +145,6 @@ pub const PreviewServer = struct {
         return self.serveIndex(req);
     }
 
-    // Non-streaming placeholder so it compiles on your Zig
     fn handleSSE(req: *std.http.Server.Request) !void {
         const body = "SSE endpoint placeholder (streaming disabled in this build).\n";
         return req.respond(body, .{
@@ -183,7 +176,6 @@ pub const PreviewServer = struct {
     }
 
     fn serveRenderedDcz(self: *PreviewServer, req: *std.http.Server.Request, fs_path: []const u8) !void {
-        // Request-scoped scratch allocator: every temp allocation below is freed at once.
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const A = arena.allocator();
@@ -220,7 +212,7 @@ pub const PreviewServer = struct {
         std.debug.print("  parse ok ({d} nodes, {d}ms)\n", .{ ast.children.items.len, std.time.milliTimestamp() - t2 });
 
         const t3 = std.time.milliTimestamp();
-        const html = try HtmlExport.exportHtml(&ast, A);
+        const html = try Renderer.renderHTML(&ast, A); // 👈 use core renderer here
         std.debug.print("  render ok ({d} bytes, {d}ms)\n", .{ html.len, std.time.milliTimestamp() - t3 });
 
         var len_buf: [24]u8 = undefined;
@@ -299,14 +291,12 @@ pub const PreviewServer = struct {
 
         const stat = try file.stat();
 
-        // Read into a single buffer (current std.http.Server doesn’t stream responses).
         const body = try self.allocator.alloc(u8, stat.size);
         defer self.allocator.free(body);
 
         const n = try file.readAll(body);
         const ctype = mimeFromPath(abs_path);
 
-        // Versioned artifacts can be cached "forever"; everything else is no-cache.
         const is_third_party =
             std.mem.indexOf(u8, abs_path, "third_party/") != null or
             std.mem.startsWith(u8, abs_path, "third_party/");
@@ -332,18 +322,12 @@ pub const PreviewServer = struct {
 //   Helper functions     //
 /////////////////////////////
 
-fn fmtU64(buf: *[32]u8, v: u64) []const u8 {
-    // 32 bytes is more than enough for any u64 in base-10
-    return std.fmt.bufPrint(buf, "{d}", .{v}) catch unreachable;
-}
-
 fn trimTrailingSlash(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
     var end = s.len;
     while (end > 0 and s[end - 1] == '/') end -= 1;
     return allocator.dupe(u8, s[0..end]);
 }
 
-/// Prevent path traversal. Returns normalized relative path without leading '/'.
 fn sanitizePath(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
     var norm = std.ArrayList(u8).init(allocator);
     defer norm.deinit();
@@ -478,7 +462,6 @@ fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return try f.readToEndAlloc(allocator, 1 << 26);
 }
 
-// Poll a file and broadcast "reload" on mtime change (kept for future SSE use).
 fn pollFileAndBroadcast(b: *hot.Broadcaster, path: []const u8, ms: u64) !void {
     var last: u64 = 0;
     while (true) {
@@ -498,7 +481,6 @@ fn fileMtime(path: []const u8) !u64 {
     return @intCast(s.mtime);
 }
 
-/// Extract inner <body>…</body> from full HTML; if no <body>, return whole.
 fn extractBodyFragment(allocator: std.mem.Allocator, full: []const u8) ![]u8 {
     const open_idx = std.mem.indexOf(u8, full, "<body");
     if (open_idx == null) return allocator.dupe(u8, full);
@@ -522,11 +504,9 @@ fn buildIndexHtml(allocator: std.mem.Allocator) ![]u8 {
         \\  <title>Docz Web Preview</title>
         \\  <script>
         \\    (function () {
-        \\      // Allow ?path=... override; default to docs/SPEC.dcz
         \\      const qs = new URLSearchParams(location.search);
         \\      const path = qs.get('path') || 'docs/SPEC.dcz';
         \\      const url = '/view?path=' + encodeURIComponent(path);
-        \\      // Use replace() so Back button doesn’t bounce through the index shell
         \\      location.replace(url);
         \\    })();
         \\  </script>
