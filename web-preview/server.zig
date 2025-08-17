@@ -7,6 +7,11 @@ const Parser = @import("../src/parser/parser.zig");
 const Renderer = @import("../src/renderer/html.zig");
 const HtmlExport = @import("html_export");
 
+fn decU64(n: u64, buf: *[24]u8) []const u8 {
+    // Fast, no-heap decimal formatting suitable for HTTP headers.
+    return std.fmt.bufPrint(buf, "{d}", .{n}) catch unreachable;
+}
+
 pub const PreviewServer = struct {
     allocator: std.mem.Allocator,
     doc_root: []const u8,
@@ -163,14 +168,14 @@ pub const PreviewServer = struct {
         const html = try buildIndexHtml(self.allocator);
         defer self.allocator.free(html);
 
-        var cl_buf: [32]u8 = undefined;
-        const cl_str = fmtU64(&cl_buf, html.len);
+        var len_buf: [24]u8 = undefined;
+        const cl = decU64(html.len, &len_buf);
 
         return req.respond(html, .{
             .status = .ok,
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "text/html; charset=utf-8" },
-                .{ .name = "Content-Length", .value = cl_str },
+                .{ .name = "Content-Length", .value = cl },
                 .{ .name = "Cache-Control", .value = "no-cache" },
                 .{ .name = "Connection", .value = "close" },
             },
@@ -178,19 +183,20 @@ pub const PreviewServer = struct {
     }
 
     fn serveRenderedDcz(self: *PreviewServer, req: *std.http.Server.Request, fs_path: []const u8) !void {
-        const A = self.allocator;
+        // Request-scoped scratch allocator: every temp allocation below is freed at once.
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const A = arena.allocator();
 
         const t0 = std.time.milliTimestamp();
         const input = readFileAlloc(A, fs_path) catch |e| {
             std.debug.print("  read FAIL {s}: {s}\n", .{ fs_path, @errorName(e) });
             const body = try std.fmt.allocPrint(A, "<pre>Failed to read {s}: {s}</pre>", .{ fs_path, @errorName(e) });
-            defer A.free(body);
             return req.respond(body, .{
                 .status = .ok,
                 .extra_headers = &.{.{ .name = "Content-Type", .value = "text/html; charset=utf-8" }},
             });
         };
-        defer A.free(input);
         std.debug.print("  read ok {s} ({d} bytes, {d}ms)\n", .{ fs_path, input.len, std.time.milliTimestamp() - t0 });
 
         const t1 = std.time.milliTimestamp();
@@ -200,16 +206,12 @@ pub const PreviewServer = struct {
                 "<pre>Tokenizer error: {s}\n(unterminated directive params or invalid syntax?)</pre>",
                 .{@errorName(e)},
             );
-            defer A.free(msg);
             return req.respond(msg, .{
                 .status = .ok,
                 .extra_headers = &.{.{ .name = "Content-Type", .value = "text/html; charset=utf-8" }},
             });
         };
-        defer {
-            Tokenizer.freeTokens(A, tokens);
-            A.free(tokens);
-        }
+        defer Tokenizer.freeTokens(A, tokens);
         std.debug.print("  tokenize ok ({d} tokens, {d}ms)\n", .{ tokens.len, std.time.milliTimestamp() - t1 });
 
         const t2 = std.time.milliTimestamp();
@@ -219,32 +221,35 @@ pub const PreviewServer = struct {
 
         const t3 = std.time.milliTimestamp();
         const html = try HtmlExport.exportHtml(&ast, A);
-        defer A.free(html);
         std.debug.print("  render ok ({d} bytes, {d}ms)\n", .{ html.len, std.time.milliTimestamp() - t3 });
+
+        var len_buf: [24]u8 = undefined;
+        const cl = decU64(html.len, &len_buf);
 
         return req.respond(html, .{
             .status = .ok,
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "text/html; charset=utf-8" },
                 .{ .name = "Cache-Control", .value = "no-cache" },
+                .{ .name = "Content-Length", .value = cl },
             },
         });
     }
 
     fn serveRenderedFragment(self: *PreviewServer, req: *std.http.Server.Request, fs_path: []const u8) !void {
-        const A = self.allocator;
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const A = arena.allocator();
 
         const t0 = std.time.milliTimestamp();
         const input = readFileAlloc(A, fs_path) catch |e| {
             std.debug.print("  read FAIL {s}: {s}\n", .{ fs_path, @errorName(e) });
             const body = try std.fmt.allocPrint(A, "<pre>Failed to read {s}: {s}</pre>", .{ fs_path, @errorName(e) });
-            defer A.free(body);
             return req.respond(body, .{
                 .status = .ok,
                 .extra_headers = &.{.{ .name = "Content-Type", .value = "text/html; charset=utf-8" }},
             });
         };
-        defer A.free(input);
         std.debug.print("  read ok {s} ({d} bytes, {d}ms)\n", .{ fs_path, input.len, std.time.milliTimestamp() - t0 });
 
         const t1 = std.time.milliTimestamp();
@@ -254,16 +259,12 @@ pub const PreviewServer = struct {
                 "<pre>Tokenizer error: {s}\n(unterminated directive params or invalid syntax?)</pre>",
                 .{@errorName(e)},
             );
-            defer A.free(msg);
             return req.respond(msg, .{
                 .status = .ok,
                 .extra_headers = &.{.{ .name = "Content-Type", .value = "text/html; charset=utf-8" }},
             });
         };
-        defer {
-            Tokenizer.freeTokens(A, tokens);
-            A.free(tokens);
-        }
+        defer Tokenizer.freeTokens(A, tokens);
         std.debug.print("  tokenize ok ({d} tokens, {d}ms)\n", .{ tokens.len, std.time.milliTimestamp() - t1 });
 
         const t2 = std.time.milliTimestamp();
@@ -273,19 +274,21 @@ pub const PreviewServer = struct {
 
         const t3 = std.time.milliTimestamp();
         const full = try Renderer.renderHTML(&ast, A);
-        defer A.free(full);
         std.debug.print("  render ok ({d} bytes, {d}ms)\n", .{ full.len, std.time.milliTimestamp() - t3 });
 
         const t4 = std.time.milliTimestamp();
         const frag = try extractBodyFragment(A, full);
-        defer A.free(frag);
         std.debug.print("  extract body ok ({d} bytes, {d}ms)\n", .{ frag.len, std.time.milliTimestamp() - t4 });
+
+        var len_buf: [24]u8 = undefined;
+        const cl = decU64(frag.len, &len_buf);
 
         return req.respond(frag, .{
             .status = .ok,
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "text/html; charset=utf-8" },
                 .{ .name = "Cache-Control", .value = "no-cache" },
+                .{ .name = "Content-Length", .value = cl },
             },
         });
     }
@@ -295,20 +298,31 @@ pub const PreviewServer = struct {
         defer file.close();
 
         const stat = try file.stat();
-        const buf = try self.allocator.alloc(u8, stat.size);
-        defer self.allocator.free(buf);
 
-        const n = try file.readAll(buf);
+        // Read into a single buffer (current std.http.Server doesn’t stream responses).
+        const body = try self.allocator.alloc(u8, stat.size);
+        defer self.allocator.free(body);
+
+        const n = try file.readAll(body);
         const ctype = mimeFromPath(abs_path);
 
-        var cl_buf: [32]u8 = undefined;
-        const cl_str = fmtU64(&cl_buf, n);
+        // Versioned artifacts can be cached "forever"; everything else is no-cache.
+        const is_third_party =
+            std.mem.indexOf(u8, abs_path, "third_party/") != null or
+            std.mem.startsWith(u8, abs_path, "third_party/");
 
-        return req.respond(buf[0..n], .{
+        const cache_header =
+            if (is_third_party) "public, max-age=31536000, immutable" else "no-cache";
+
+        var len_buf: [24]u8 = undefined;
+        const len_s = decU64(n, &len_buf);
+
+        return req.respond(body[0..n], .{
             .status = .ok,
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = ctype },
-                .{ .name = "Content-Length", .value = cl_str },
+                .{ .name = "Content-Length", .value = len_s },
+                .{ .name = "Cache-Control", .value = cache_header },
             },
         });
     }

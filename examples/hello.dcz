@@ -3,6 +3,7 @@
 @style(mode:"global")
 heading-level-1: font-size=36px, font-weight=bold
 body-text: line-height=1.6
+@end
 
 # Hello, Docz!
 This is **bold**, *italic*, and a [link](https://ziglang.org).
