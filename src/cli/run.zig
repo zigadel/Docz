@@ -80,15 +80,14 @@ fn generateOnce(
     out_dir: []const u8,
     opts: GenerateOpts,
 ) !void {
-    // Render (fallback for now: headings, paragraphs, math, code, inline formatting)
+    // 0) Read input and render a full HTML document (<head> + <body>)
     const input = try common.readFileAlloc(alloc, dcz_path);
     defer alloc.free(input);
 
-    // NOTE: we render to a full HTML document with <head> + <body>.
     var final_html = try fallback.render(alloc, input);
     defer alloc.free(final_html);
 
-    // 1) Core CSS: write and link FIRST
+    // 1) Core CSS — write file and link FIRST
     {
         const core_out = try std.fs.path.join(alloc, &.{ out_dir, CORE_CSS_NAME });
         defer alloc.free(core_out);
@@ -99,10 +98,11 @@ fn generateOnce(
         final_html = linked_core;
     }
 
-    // 2) Optional external CSS (currently just a stub file)
+    // 2) Optional external CSS (empty/stub or user-provided path name)
     if (opts.css_mode == .file) {
         const css_out = try std.fs.path.join(alloc, &.{ out_dir, opts.css_file_name });
         defer alloc.free(css_out);
+        // Write an empty file if caller didn't already generate one upstream.
         try common.writeFile(css_out, "");
 
         const linked = try html_ops.insertCssLinkBeforeHeadClose(alloc, final_html, opts.css_file_name);
@@ -110,9 +110,10 @@ fn generateOnce(
         final_html = linked;
     }
 
-    // 3) Tailwind (vendored or monorepo build) — link LAST if enabled
+    // 3) Tailwind (vendored or monorepo build) — link LAST among CSS if discovered
     if (assets.findTailwindCss(alloc) catch null) |src_tw| {
         defer alloc.free(src_tw);
+
         const tw_out = try std.fs.path.join(alloc, &.{ out_dir, TAILWIND_CSS_NAME });
         defer alloc.free(tw_out);
         try assets.copyFileStreaming(src_tw, tw_out);
@@ -122,7 +123,7 @@ fn generateOnce(
         final_html = linked_tw;
     }
 
-    // 4) KaTeX (vendored) — inject if available/enabled
+    // 4) KaTeX (vendored) — inject assets + init script if available
     if (assets.findKatexAssets(alloc) catch null) |k| {
         defer {
             alloc.free(k.css_href);
@@ -130,59 +131,72 @@ fn generateOnce(
             alloc.free(k.auto_href);
         }
 
-        // Build snippet without fmt placeholders (to avoid brace parsing issues).
         var sn = std.ArrayList(u8).init(alloc);
         errdefer sn.deinit();
+
+        // <link rel="stylesheet" href="...katex.min.css">
         try sn.appendSlice("<link rel=\"stylesheet\" href=\"");
         try sn.appendSlice(k.css_href);
         try sn.appendSlice("\">\n");
+
+        // <script defer src="...katex.min.js"></script>
         try sn.appendSlice("<script defer src=\"");
         try sn.appendSlice(k.js_href);
         try sn.appendSlice("\"></script>\n");
+
+        // <script defer src="...auto-render.min.js"></script>
         try sn.appendSlice("<script defer src=\"");
         try sn.appendSlice(k.auto_href);
         try sn.appendSlice("\"></script>\n");
+
+        // Inline init (trust: true so \htmlClass/\htmlId/\htmlStyle/\htmlData work)
+        // + gentle strictness and throwOnError:false for authoring friendliness.
+        // Also add a convenience macro \class → \htmlClass for nicer authoring.
         try sn.appendSlice(
             \\<script>
             \\document.addEventListener('DOMContentLoaded', function () {
-            \\  if (window.renderMathInElement) {
-            \\    renderMathInElement(document.body, {
-            \\      delimiters: [
-            \\        {left: "$$", right: "$$", display: true},
-            \\        {left: "$",  right: "$",  display: false},
-            \\        {left: "\\(", right: "\\)", display: false},
-            \\        {left: "\\[", right: "\\]", display: true}
-            \\      ]
-            \\    });
-            \\  }
+            \\  if (!window.renderMathInElement) return;
+            \\  renderMathInElement(document.body, {
+            \\    delimiters: [
+            \\      {left: "$$", right: "$$", display: true},
+            \\      {left: "$",  right: "$",  display: false},
+            \\      {left: "\\(", right: "\\)", display: false},
+            \\      {left: "\\[", right: "\\]", display: true}
+            \\    ],
+            \\    throwOnError: false,
+            \\    strict: "ignore",
+            \\    trust: true,
+            \\    macros: {
+            \\      "\\\\class": "\\\\htmlClass"
+            \\    }
+            \\  });
             \\});
             \\</script>
             \\
         );
-        const snippet = try sn.toOwnedSlice();
 
+        const snippet = try sn.toOwnedSlice();
         const injected = try html_ops.insertBeforeHeadClose(alloc, final_html, snippet);
         alloc.free(final_html);
         final_html = injected;
-
         alloc.free(snippet);
     }
 
-    // 5) Live reload script + marker
+    // 5) Live reload (dev) — small script + hot marker file
     if (opts.live_reload) {
         const with_live = try html_ops.injectLiveScript(alloc, final_html, LIVE_MARKER);
         alloc.free(final_html);
         final_html = with_live;
     }
 
-    // 6) Pretty print (cheap)
+    // 6) Pretty print (optional, cheap)
     if (opts.pretty) {
         const pretty = try html_ops.prettyHtml(alloc, final_html);
         alloc.free(final_html);
         final_html = pretty;
     }
 
-    // 7) Write html + update hot marker last (after file is fully written)
+    // 7) Write HTML and update hot marker last (after file is fully written)
     const html_out = try std.fs.path.join(alloc, &.{ out_dir, "index.html" });
     defer alloc.free(html_out);
     try common.writeFile(html_out, final_html);

@@ -1,0 +1,3671 @@
+1. `docz/src/parser/tokenizer.zig`:
+
+```
+const std = @import("std");
+
+pub const TokenType = enum {
+    Directive,
+    ParameterKey,
+    ParameterValue,
+    Content,
+    BlockEnd,
+};
+
+pub const Token = struct {
+    kind: TokenType,
+    lexeme: []const u8,
+    is_allocated: bool = false, // track ownership for @@ case
+};
+
+/// Optional config (reserved for future knobs).
+/// Use `tokenize()` for the default behavior; use `tokenizeWith()` if/when
+/// you want to expose options without changing the public signature.
+pub const TokenizerConfig = struct {
+    /// Directives (with leading '@') that start a fenced raw block.
+    fenced_directives: []const []const u8 = &.{ "@code", "@math", "@style", "@css" },
+
+    pub fn isFenced(self: *const TokenizerConfig, dir: []const u8) bool {
+        for (self.fenced_directives) |d| {
+            if (std.mem.eql(u8, d, dir)) return true;
+        }
+        return false;
+    }
+};
+
+/// Public, backward-compatible API used across the repo/tests.
+pub fn tokenize(input: []const u8, allocator: std.mem.Allocator) ![]Token {
+    return tokenizeWith(input, allocator, .{});
+}
+
+/// Extended API (kept internal for now) that accepts options.
+pub fn tokenizeWith(input: []const u8, allocator: std.mem.Allocator, config: TokenizerConfig) ![]Token {
+    var tokens = std.ArrayList(Token).init(allocator);
+    errdefer tokens.deinit();
+
+    var i: usize = 0;
+
+    // Skip UTF-8 BOM if present
+    if (input.len >= 3 and input[0] == 0xEF and input[1] == 0xBB and input[2] == 0xBF) {
+        i = 3;
+    }
+
+    // Fence state: when non-empty, we are inside a raw block until a line that is "@end"
+    // or ends with "@end" (after optional whitespace).
+    var fence_name: []const u8 = "";
+
+    // Global no-progress guard (defensive)
+    var prev_i: usize = ~@as(usize, 0);
+    var stuck_iters: usize = 0;
+
+    while (i < input.len) : ({
+        if (i == prev_i) {
+            stuck_iters += 1;
+            if (stuck_iters >= 10_000_000) return error.TokenizerStuck;
+        } else {
+            prev_i = i;
+            stuck_iters = 0;
+        }
+    }) {
+        // ── Fenced mode: slurp raw content until a closer appears.
+        if (fence_name.len != 0) {
+            // Skip a single leading newline so fenced content begins on its own line.
+            if (i < input.len) {
+                if (input[i] == '\r') {
+                    if (i + 1 < input.len and input[i + 1] == '\n') {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                } else if (input[i] == '\n') {
+                    i += 1;
+                }
+            }
+
+            // Optional heuristic: for math blocks only, strip leading indentation on the first content line.
+            if (std.mem.eql(u8, fence_name, "@math")) {
+                while (i < input.len and (input[i] == ' ' or input[i] == '\t')) : (i += 1) {}
+            }
+
+            const content_start = i;
+
+            while (i < input.len) {
+                const eol = lineEnd(input, i);
+                const line = input[i..eol];
+
+                // Case 1: whole trimmed line is "@end"
+                if (trimmedEq(line, "@end")) {
+                    if (content_start < i) {
+                        try tokens.append(.{ .kind = .Content, .lexeme = input[content_start..i] });
+                    }
+                    try tokens.append(.{ .kind = .BlockEnd, .lexeme = "@end" });
+                    i = if (eol < input.len and input[eol] == '\n') eol + 1 else eol;
+                    fence_name = "";
+                    break;
+                }
+
+                // Case 2: inline closer at end-of-line: "...something... @end[WS]"
+                if (std.mem.indexOf(u8, line, "@end")) |pos| {
+                    const after = line[pos..];
+                    if (trimmedEq(after, "@end")) {
+                        // trim any spaces/tabs immediately before "@end"
+                        var cut_abs = i + pos;
+                        while (cut_abs > content_start and (input[cut_abs - 1] == ' ' or input[cut_abs - 1] == '\t')) {
+                            cut_abs -= 1;
+                        }
+
+                        if (content_start < cut_abs) {
+                            try tokens.append(.{ .kind = .Content, .lexeme = input[content_start..cut_abs] });
+                        }
+                        try tokens.append(.{ .kind = .BlockEnd, .lexeme = "@end" });
+                        // consume the rest of this line including newline
+                        i = if (eol < input.len and input[eol] == '\n') eol + 1 else eol;
+                        fence_name = "";
+                        break;
+                    }
+                }
+
+                // Not a closer: advance to next line
+                i = if (eol < input.len and input[eol] == '\n') eol + 1 else eol;
+            }
+
+            // EOF with no @end: emit remainder and exit fence
+            if (fence_name.len != 0 and content_start < input.len) {
+                try tokens.append(.{ .kind = .Content, .lexeme = input[content_start..input.len] });
+                fence_name = "";
+                i = input.len;
+            }
+            continue;
+        }
+
+        const c = input[i];
+
+        // 1) Escaped literal '@' — "@@" + word → emit as Content("@word")
+        if (c == '@' and i + 1 < input.len and input[i + 1] == '@') {
+            i += 2; // skip "@@"
+            const start = i;
+            while (i < input.len and !std.ascii.isWhitespace(input[i])) : (i += 1) {}
+            const word = input[start..i];
+
+            const combined = try std.fmt.allocPrint(allocator, "@{s}", .{word});
+            try tokens.append(.{
+                .kind = .Content,
+                .lexeme = combined,
+                .is_allocated = true,
+            });
+            continue;
+        }
+
+        // 2) Standalone @end: only when the rest of this line (trimmed) is exactly "@end"
+        if (c == '@' and i + 4 <= input.len and std.mem.eql(u8, input[i .. i + 4], "@end")) {
+            const eol = lineEnd(input, i);
+            if (trimmedEq(input[i..eol], "@end")) {
+                try tokens.append(.{ .kind = .BlockEnd, .lexeme = "@end" });
+                i = if (eol < input.len and input[eol] == '\n') eol + 1 else eol;
+                continue;
+            }
+            // else: literal "`@end`" in prose → fall through
+        }
+
+        // 3) Directives at SOL (allow leading spaces/tabs)
+        if (c == '@') {
+            var j = i;
+            while (j > 0 and (input[j - 1] == ' ' or input[j - 1] == '\t')) : (j -= 1) {}
+            const at_sol = (j == 0) or (input[j - 1] == '\n' or input[j - 1] == '\r');
+
+            if (at_sol) {
+                const d_start = i;
+                i += 1; // skip '@'
+
+                // Allow letters, digits, '_' and '-' in directive identifiers.
+                while (i < input.len) : (i += 1) {
+                    const ch = input[i];
+                    if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-')) break;
+                }
+                const directive_full = input[d_start..i]; // e.g. "@meta", "@style-def"
+
+                if (directive_full.len == 1) {
+                    try tokens.append(.{ .kind = .Content, .lexeme = "@" });
+                    continue;
+                }
+
+                try tokens.append(.{ .kind = .Directive, .lexeme = directive_full });
+
+                // Optional parameter list: (...)
+                if (i < input.len and input[i] == '(') {
+                    i += 1;
+
+                    var inner_prev: usize = ~@as(usize, 0);
+                    var inner_stuck: usize = 0;
+
+                    while (i < input.len and input[i] != ')') : ({
+                        if (i == inner_prev) {
+                            inner_stuck += 1;
+                            if (inner_stuck >= 10_000_000) return error.TokenizerStuck;
+                        } else {
+                            inner_prev = i;
+                            inner_stuck = 0;
+                        }
+                    }) {
+                        // skip whitespace
+                        while (i < input.len and std.ascii.isWhitespace(input[i])) : (i += 1) {}
+                        if (i >= input.len) break;
+
+                        // commas
+                        if (input[i] == ',') {
+                            i += 1;
+                            continue;
+                        }
+
+                        // key: allow letters, digits, '_' and '-' (to match directive style)
+                        const key_start = i;
+                        while (i < input.len) : (i += 1) {
+                            const ch = input[i];
+                            if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-')) break;
+                        }
+                        if (i > key_start) {
+                            try tokens.append(.{ .kind = .ParameterKey, .lexeme = input[key_start..i] });
+                        } else {
+                            // skip one char to avoid infinite loop if malformed
+                            if (i < input.len and input[i] != ')' and input[i] != ',') i += 1;
+                            continue;
+                        }
+
+                        // '=' and value
+                        if (i < input.len and input[i] == '=') {
+                            i += 1;
+
+                            if (i < input.len and input[i] == '"') {
+                                i += 1; // opening quote
+                                const str_start = i;
+                                while (i < input.len) : (i += 1) {
+                                    if (input[i] == '"') break;
+                                }
+                                const str_end = if (i < input.len) i else input.len;
+                                try tokens.append(.{ .kind = .ParameterValue, .lexeme = input[str_start..str_end] });
+                                if (i < input.len and input[i] == '"') i += 1;
+                            } else {
+                                const v_start = i;
+                                while (i < input.len) : (i += 1) {
+                                    const ch = input[i];
+                                    if (std.ascii.isWhitespace(ch) or ch == ')' or ch == ',') break;
+                                }
+                                if (i > v_start) {
+                                    try tokens.append(.{ .kind = .ParameterValue, .lexeme = input[v_start..i] });
+                                }
+                            }
+                        }
+                    }
+                    if (i < input.len and input[i] == ')') i += 1;
+                }
+
+                // Fence-opening directives (configurable)
+                if (config.isFenced(directive_full)) {
+                    fence_name = directive_full; // any non-empty marker works
+                }
+
+                continue;
+            }
+        }
+
+        // 4) Line comments starting with "#:" (to end of line)
+        if (c == '#' and i + 1 < input.len and input[i + 1] == ':') {
+            while (i < input.len and input[i] != '\n') : (i += 1) {}
+            continue;
+        }
+
+        // 5) Whitespace: skip (includes newlines)
+        if (std.ascii.isWhitespace(c)) {
+            i += 1;
+            continue;
+        }
+
+        // 6) Raw content until newline OR a standalone "@end" OR a SOL directive
+        const content_start = i;
+        while (i < input.len) : (i += 1) {
+            const ch = input[i];
+            if (ch == '\n' or ch == '\r') break;
+
+            if (ch == '@') {
+                // Break on "@@" so outer loop can emit the literal-@ token
+                if (i + 1 < input.len and input[i + 1] == '@') break;
+
+                // If remainder of this line (trimmed) is exactly "@end", stop here
+                const eol2 = lineEnd(input, i);
+                if (eol2 > i and trimmedEq(input[i..eol2], "@end")) break;
+
+                // If it's a start-of-line directive (allowing indentation), let outer loop handle it.
+                var k = i;
+                while (k > 0 and (input[k - 1] == ' ' or input[k - 1] == '\t')) : (k -= 1) {}
+                const sol = (k == 0) or (input[k - 1] == '\n' or input[k - 1] == '\r');
+                if (sol) break;
+            }
+        }
+        if (i > content_start) {
+            try tokens.append(.{ .kind = .Content, .lexeme = input[content_start..i] });
+        }
+        // newline (if any) handled next iteration
+    }
+
+    return tokens.toOwnedSlice();
+}
+
+/// Free all heap allocations in token list.
+pub fn freeTokens(allocator: std.mem.Allocator, tokens: []Token) void {
+    for (tokens) |t| {
+        if (t.is_allocated) allocator.free(t.lexeme);
+    }
+}
+
+// ── helpers ─────────────────────────────────────────────────
+
+/// Return index of end-of-line (position of '\n' or input.len).
+fn lineEnd(input: []const u8, pos: usize) usize {
+    var j = pos;
+    while (j < input.len and j < input.len and input[j] != '\n') : (j += 1) {}
+    return j;
+}
+
+/// Compare slice (trimmed of spaces/tabs/CR) with needle.
+fn trimmedEq(slice: []const u8, needle: []const u8) bool {
+    const t = std.mem.trim(u8, slice, " \t\r");
+    return std.mem.eql(u8, t, needle);
+}
+
+// ----------------------
+// Tests
+// ----------------------
+test "Tokenize escape sequence @@ as literal @" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    var allocator = gpa.allocator();
+
+    const input = "Contact @@support@example.com";
+    const toks = try tokenize(input, allocator);
+    defer {
+        freeTokens(allocator, toks);
+        allocator.free(toks);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), toks.len);
+    try std.testing.expectEqualStrings("Contact ", toks[0].lexeme);
+    try std.testing.expectEqualStrings("@support@example.com", toks[1].lexeme);
+}
+
+test "Unclosed parameter list does not hang" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    const input =
+        \\@meta(title="Hello"
+        \\Content after
+    ;
+
+    const toks = try tokenize(input, A);
+    defer {
+        freeTokens(A, toks);
+        A.free(toks);
+    }
+
+    // We at least see the directive and some content; exact count is not strict.
+    try std.testing.expect(toks.len >= 2);
+}
+
+test "Fenced code block captures raw until standalone or inline @end" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    const input =
+        \\@code(language="txt")
+        \\line 1
+        \\line 2 @end
+        \\After
+    ;
+
+    const toks = try tokenize(input, A);
+    defer {
+        freeTokens(A, toks);
+        A.free(toks);
+    }
+
+    // Expect: Directive, ParamKey, ParamValue, Content("line 1\nline 2"), BlockEnd, Content("After")
+    try std.testing.expect(toks.len >= 5);
+    try std.testing.expect(toks[0].kind == .Directive);
+    try std.testing.expect(toks[3].kind == .Content);
+    try std.testing.expect(std.mem.indexOf(u8, toks[3].lexeme, "line 2") != null);
+    // Ensure "@end" not included in content
+    try std.testing.expect(std.mem.indexOf(u8, toks[3].lexeme, "@end") == null);
+}
+
+test "Inline `@end` in prose does not become BlockEnd (outside fence)" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    const input =
+        \\This paragraph mentions `@end` and continues.
+        \\@heading(level=2) Title
+        \\@end
+    ;
+
+    const toks = try tokenize(input, A);
+    defer {
+        freeTokens(A, toks);
+        A.free(toks);
+    }
+
+    var found_inline = false;
+    var found_blockend = false;
+    for (toks) |t| {
+        if (t.kind == .Content and std.mem.indexOf(u8, t.lexeme, "`@end`") != null) found_inline = true;
+        if (t.kind == .BlockEnd) found_blockend = true;
+    }
+    try std.testing.expect(found_inline);
+    try std.testing.expect(found_blockend);
+}
+
+test "Alias @css fences like @style" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    const input =
+        \\@css()
+        \\p { color: green }
+        \\@end
+    ;
+
+    const toks = try tokenize(input, A);
+    defer {
+        freeTokens(A, toks);
+        A.free(toks);
+    }
+
+    // Expect: Directive(@css), params, Content, BlockEnd
+    var saw_content = false;
+    var saw_blockend = false;
+    for (toks) |t| {
+        if (t.kind == .Content and std.mem.indexOf(u8, t.lexeme, "color: green") != null) saw_content = true;
+        if (t.kind == .BlockEnd) saw_blockend = true;
+    }
+    try std.testing.expect(saw_content);
+    try std.testing.expect(saw_blockend);
+}
+
+test "Directive names and param keys may contain '-'" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    const input =
+        \\@style-def(theme-name="default")
+        \\.x{}
+        \\@end
+    ;
+
+    const toks = try tokenize(input, A);
+    defer {
+        freeTokens(A, toks);
+        A.free(toks);
+    }
+
+    // First token should be a Directive whose lexeme includes "@style-def"
+    try std.testing.expect(toks.len >= 3);
+    try std.testing.expect(toks[0].kind == .Directive);
+    try std.testing.expect(std.mem.eql(u8, toks[0].lexeme, "@style-def"));
+    // ParameterKey should include '-'
+    var saw_key = false;
+    for (toks) |t| {
+        if (t.kind == .ParameterKey and std.mem.eql(u8, t.lexeme, "theme-name")) saw_key = true;
+    }
+    try std.testing.expect(saw_key);
+}
+```
+
+2. `docz/src/parser/parser.zig`:
+
+```
+const std = @import("std");
+const Token = @import("tokenizer.zig").Token;
+const TokenType = @import("tokenizer.zig").TokenType;
+const ASTNode = @import("ast.zig").ASTNode;
+const NodeType = @import("ast.zig").NodeType;
+
+/// Maps a directive string (e.g. "@meta") to a NodeType.
+/// Includes simple aliases like "@css" → Style.
+fn directiveToNodeType(directive: []const u8) NodeType {
+    if (std.mem.eql(u8, directive, "@meta")) return NodeType.Meta;
+    if (std.mem.eql(u8, directive, "@heading")) return NodeType.Heading;
+    if (std.mem.eql(u8, directive, "@code")) return NodeType.CodeBlock;
+    if (std.mem.eql(u8, directive, "@math")) return NodeType.Math;
+    if (std.mem.eql(u8, directive, "@image")) return NodeType.Media;
+    if (std.mem.eql(u8, directive, "@import")) return NodeType.Import;
+    if (std.mem.eql(u8, directive, "@style")) return NodeType.Style;
+
+    // Aliases / planned:
+    if (std.mem.eql(u8, directive, "@css")) return NodeType.Style; // alias of style
+    if (std.mem.eql(u8, directive, "@style-def")) return NodeType.StyleDef;
+
+    // Fallback: treat as generic content; unknowns can be upgraded later
+    return NodeType.Content;
+}
+
+fn isBlockDirective(nt: NodeType) bool {
+    return switch (nt) {
+        .CodeBlock, .Math, .Style, .Css, .StyleDef => true,
+        else => false,
+    };
+}
+
+/// Parses tokens into an ASTNode tree
+pub fn parse(tokens: []const Token, allocator: std.mem.Allocator) !ASTNode {
+    var root = ASTNode.init(allocator, .Document);
+
+    var i: usize = 0;
+    while (i < tokens.len) {
+        const tok = tokens[i];
+
+        if (tok.kind == .Directive) {
+            const node_type = directiveToNodeType(tok.lexeme);
+            var node = ASTNode.init(allocator, node_type);
+            i += 1;
+
+            // parameters
+            while (i + 1 < tokens.len and tokens[i].kind == .ParameterKey and tokens[i + 1].kind == .ParameterValue) {
+                try node.attributes.put(tokens[i].lexeme, tokens[i + 1].lexeme);
+                i += 2;
+            }
+
+            // inline content (e.g. heading title after ")")
+            if (i < tokens.len and tokens[i].kind == .Content) {
+                node.content = tokens[i].lexeme; // not owned
+                node.owns_content = false;
+                i += 1;
+            }
+
+            // block body for fenced directives
+            if (isBlockDirective(node_type)) {
+                var block = std.ArrayList(u8).init(allocator);
+                defer block.deinit();
+
+                while (i < tokens.len and tokens[i].kind != .BlockEnd) : (i += 1) {
+                    try block.appendSlice(tokens[i].lexeme);
+                    try block.append('\n');
+                }
+                if (i < tokens.len and tokens[i].kind == .BlockEnd) {
+                    i += 1; // skip @end
+                }
+
+                if (block.items.len > 0) {
+                    node.content = try block.toOwnedSlice();
+                    node.owns_content = true; // we allocated it
+                }
+            }
+
+            try root.children.append(node);
+            continue;
+        }
+
+        if (tok.kind == .Content) {
+            var content_node = ASTNode.init(allocator, .Content);
+            content_node.content = tok.lexeme; // not owned
+            try root.children.append(content_node);
+            i += 1;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    return root;
+}
+
+// ----------------------
+// Tests
+// ----------------------
+test "Parse multiple directives" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const tokenizer = @import("tokenizer.zig");
+    const input =
+        \\@meta(title="Docz Guide", author="Team") @end
+        \\@heading(level=2) Welcome to Docz @end
+        \\@code(language="zig")
+        \\const x = 42;
+        \\@end
+    ;
+    const tokens = try tokenizer.tokenize(input, allocator);
+    defer allocator.free(tokens);
+
+    var ast = try parse(tokens, allocator);
+    defer ast.deinit();
+
+    try std.testing.expectEqual(ast.children.items.len, 3);
+    try std.testing.expectEqual(ast.children.items[0].node_type, .Meta);
+    try std.testing.expectEqual(ast.children.items[1].node_type, .Heading);
+    try std.testing.expectEqual(ast.children.items[2].node_type, .CodeBlock);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, ast.children.items[2].content, 1, "const x = 42;"));
+}
+```
+
+3. `docz/src/convert/inline/renderer.zig`:
+
+```
+// src/convert/inline/renderer.zig
+const std = @import("std");
+
+pub const StringMap = std.StringHashMap([]const u8);
+
+pub const InlineStyleAttrs = struct {
+    // Parsed attributes (all optional)
+    name: ?[]const u8 = null, // alias key into StyleDef map
+    classes: ?[]const u8 = null, // explicit classes
+    style: ?[]const u8 = null, // explicit inline CSS
+    class_attr: ?[]const u8 = null, // raw 'class=' value (may be classes or actually CSS mistaken as class)
+};
+
+fn isSpace(b: u8) bool {
+    return b == ' ' or b == '\t' or b == '\r' or b == '\n';
+}
+
+fn asciiEq(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var idx: usize = 0;
+    while (idx < a.len) : (idx += 1) {
+        const ca = a[idx];
+        const cb = b[idx];
+        const la = if (ca >= 'A' and ca <= 'Z') ca + 32 else ca;
+        const lb = if (cb >= 'A' and cb <= 'Z') cb + 32 else cb;
+        if (la != lb) return false;
+    }
+    return true;
+}
+
+fn classLooksLikeCss(s: []const u8) bool {
+    // crude heuristic: if there's a ':' earlier than a space or dot or end, it's probably CSS "color:red"
+    return std.mem.indexOfScalar(u8, s, ':') != null and std.mem.indexOfScalar(u8, s, ';') != null;
+}
+
+fn htmlNeedsEscape(c: u8) bool {
+    return c == '&' or c == '<' or c == '>';
+}
+
+fn htmlAttrNeedsEscape(c: u8) bool {
+    return c == '&' or c == '<' or c == '>' or c == '"';
+}
+
+/// Escape text for HTML element content.
+pub fn escapeHtml(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const ch = s[i];
+        if (!htmlNeedsEscape(ch)) {
+            try out.append(ch);
+            continue;
+        }
+        switch (ch) {
+            '&' => try out.appendSlice("&amp;"),
+            '<' => try out.appendSlice("&lt;"),
+            '>' => try out.appendSlice("&gt;"),
+            else => try out.append(ch),
+        }
+    }
+    return out.toOwnedSlice();
+}
+
+/// Escape text for HTML attribute value (double-quoted).
+fn escapeHtmlAttr(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const ch = s[i];
+        if (!htmlAttrNeedsEscape(ch)) {
+            try out.append(ch);
+            continue;
+        }
+        switch (ch) {
+            '&' => try out.appendSlice("&amp;"),
+            '<' => try out.appendSlice("&lt;"),
+            '>' => try out.appendSlice("&gt;"),
+            '"' => try out.appendSlice("&quot;"),
+            else => try out.append(ch),
+        }
+    }
+    return out.toOwnedSlice();
+}
+
+/// Minimal decode for entities when reading attribute *sources* inside (...) so
+/// users can write &quot; etc. We only handle a tiny set needed here.
+fn decodeMinimalEntities(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    // Fast path: if no '&', return dup
+    if (std.mem.indexOfScalar(u8, s, '&') == null) return try allocator.dupe(u8, s);
+
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] != '&') {
+            try out.append(s[i]);
+            i += 1;
+            continue;
+        }
+        // try a few named entities
+        if (std.mem.startsWith(u8, s[i..], "&quot;")) {
+            try out.append('"');
+            i += "&quot;".len;
+        } else if (std.mem.startsWith(u8, s[i..], "&amp;")) {
+            try out.append('&');
+            i += "&amp;".len;
+        } else if (std.mem.startsWith(u8, s[i..], "&lt;")) {
+            try out.append('<');
+            i += "&lt;".len;
+        } else if (std.mem.startsWith(u8, s[i..], "&gt;")) {
+            try out.append('>');
+            i += "&gt;".len;
+        } else {
+            // unknown; copy verbatim '&' and advance
+            try out.append('&');
+            i += 1;
+        }
+    }
+    return out.toOwnedSlice();
+}
+
+/// Parse the `( ... )` segment of @style(...). Supports:
+/// - name:"alias"
+/// - classes:"a b"
+/// - class:"a b"  (alias for classes, OR if value looks like CSS, treat as style)
+/// - style:"color:red"
+pub fn parseInlineStyleAttrs(allocator: std.mem.Allocator, raw: []const u8) InlineStyleAttrs {
+    // NOTE: best-effort lenient parser; never fails, just returns what it can.
+    var attrs: InlineStyleAttrs = .{};
+
+    var i: usize = 0;
+    while (i < raw.len) {
+        // skip ws and commas
+        while (i < raw.len and (isSpace(raw[i]) or raw[i] == ',')) : (i += 1) {}
+        if (i >= raw.len) break;
+
+        // parse key
+        const key_start = i;
+        while (i < raw.len) : (i += 1) {
+            const c = raw[i];
+            if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '-')) break;
+        }
+        const key = raw[key_start..i];
+
+        // skip ws
+        while (i < raw.len and isSpace(raw[i])) : (i += 1) {}
+
+        if (i >= raw.len or raw[i] != '=') {
+            // no value; skip token
+            while (i < raw.len and raw[i] != ',') : (i += 1) {}
+            continue;
+        }
+        i += 1; // skip '='
+
+        // skip ws
+        while (i < raw.len and isSpace(raw[i])) : (i += 1) {}
+        if (i >= raw.len) break;
+
+        // parse value: quoted "...", possibly with &quot; entities
+        var val_buf: []u8 = &[_]u8{};
+        if (raw[i] == '"') {
+            i += 1;
+            const start = i;
+            while (i < raw.len and raw[i] != '"') : (i += 1) {}
+            const end = if (i <= raw.len) i else raw.len;
+
+            const slice = raw[start..end];
+            const decoded = decodeMinimalEntities(allocator, slice) catch slice; // best-effort
+            // if decode alloc'd, keep; else dup so we can own it? We only need borrowed views.
+            // We will store borrowed slices pointing into either decoded (owned) or original raw.
+            // To keep memory simple, we leak decoded into this scope and free nothing here
+            // (the caller never owns these slices). For safety across calls, store views into decoded.
+            val_buf = switch (@typeInfo(@TypeOf(decoded))) {
+                .Pointer => decoded,
+                else => allocator.dupe(u8, decoded) catch decoded,
+            };
+            if (i < raw.len and raw[i] == '"') i += 1;
+        } else {
+            const start = i;
+            while (i < raw.len and raw[i] != ',' and !isSpace(raw[i])) : (i += 1) {}
+            const slice = raw[start..i];
+            val_buf = slice;
+        }
+
+        if (asciiEq(key, "name")) {
+            attrs.name = val_buf;
+        } else if (asciiEq(key, "classes")) {
+            attrs.classes = val_buf;
+        } else if (asciiEq(key, "class")) {
+            attrs.class_attr = val_buf;
+        } else if (asciiEq(key, "style")) {
+            attrs.style = val_buf;
+        } else {
+            // ignore unknowns here
+        }
+    }
+
+    // Interpret class_attr if present
+    if (attrs.class_attr) |cval| {
+        if (classLooksLikeCss(cval)) {
+            if (attrs.style == null) attrs.style = cval;
+        } else {
+            if (attrs.classes == null) attrs.classes = cval;
+        }
+    }
+
+    return attrs;
+}
+
+/// Core rewriter: scan 's' for inline @style(...)[ws]TEXT@end occurrences.
+/// - Emits normal text escaped for HTML
+/// - Emits matched directives as <span ...>escaped(TEXT)</span>
+/// - Resolves aliases via 'aliases' map when name= is present and classes= absent
+pub fn rewriteInlineStyleDirectives(
+    allocator: std.mem.Allocator,
+    s: []const u8,
+    aliases: *const StringMap,
+) ![]u8 {
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+
+    const needle = "@style(";
+    var i: usize = 0;
+
+    while (i < s.len) {
+        const start_opt = std.mem.indexOfPos(u8, s, i, needle);
+        if (start_opt == null) {
+            // no more directives; escape the tail and finish
+            const tail = try escapeHtml(allocator, s[i..]);
+            defer allocator.free(tail);
+            try out.appendSlice(tail);
+            break;
+        }
+
+        const start = start_opt.?;
+
+        // Emit prefix as escaped
+        if (start > i) {
+            const prefix = try escapeHtml(allocator, s[i..start]);
+            defer allocator.free(prefix);
+            try out.appendSlice(prefix);
+        }
+
+        // Parse "(...)" after "@style("
+        const open = start + needle.len;
+        if (open >= s.len) {
+            // malformed tail; escape the rest and end
+            const rest = try escapeHtml(allocator, s[start..]);
+            defer allocator.free(rest);
+            try out.appendSlice(rest);
+            break;
+        }
+
+        const paren_end_opt = std.mem.indexOfScalarPos(u8, s, open, ')');
+        if (paren_end_opt == null) {
+            // malformed; emit literally
+            const rest = try escapeHtml(allocator, s[start..]);
+            defer allocator.free(rest);
+            try out.appendSlice(rest);
+            break;
+        }
+        const paren_end = paren_end_opt.?;
+
+        // Extract raw attrs (borrowed slice)
+        const raw_attrs = s[open..paren_end];
+        const attrs = parseInlineStyleAttrs(allocator, raw_attrs);
+
+        // After ")", optional whitespace, then inline content until first "@end"
+        var p: usize = paren_end + 1;
+        while (p < s.len and isSpace(s[p])) : (p += 1) {}
+
+        const end_opt = std.mem.indexOfPos(u8, s, p, "@end");
+        if (end_opt == null) {
+            // malformed (no closer); emit literally
+            const rest = try escapeHtml(allocator, s[start..]);
+            defer allocator.free(rest);
+            try out.appendSlice(rest);
+            break;
+        }
+        const end_idx = end_opt.?;
+        const inner_raw = s[p..end_idx];
+
+        // Determine class/style to render
+        var classes_to_use: ?[]const u8 = null;
+
+        if (attrs.classes) |cls| {
+            classes_to_use = cls;
+        } else if (attrs.name) |nm| {
+            if (aliases.get(nm)) |resolved| {
+                classes_to_use = resolved;
+            }
+        }
+
+        // Build the <span ...>escaped(inner)</span>
+        const inner_esc = try escapeHtml(allocator, inner_raw);
+        defer allocator.free(inner_esc);
+
+        if (attrs.style) |sty| {
+            const sty_esc = try escapeHtmlAttr(allocator, sty);
+            defer allocator.free(sty_esc);
+
+            try out.appendSlice("<span style=\"");
+            try out.appendSlice(sty_esc);
+            try out.appendSlice("\">");
+            try out.appendSlice(inner_esc);
+            try out.appendSlice("</span>");
+        } else if (classes_to_use) |cls2| {
+            const cls_esc = try escapeHtmlAttr(allocator, cls2);
+            defer allocator.free(cls_esc);
+
+            try out.appendSlice("<span class=\"");
+            try out.appendSlice(cls_esc);
+            try out.appendSlice("\">");
+            try out.appendSlice(inner_esc);
+            try out.appendSlice("</span>");
+        } else {
+            // No usable attrs; drop wrapper and just output escaped inner text
+            try out.appendSlice(inner_esc);
+        }
+
+        // advance past "@end"
+        i = end_idx + "@end".len;
+    }
+
+    return out.toOwnedSlice();
+}
+
+/// Public entry point used by the HTML exporter’s Content branch.
+/// It produces *trusted* inline HTML for a paragraph:
+/// - Escapes everything
+/// - Rewrites inline @style(...)...@end into <span...>…</span>
+pub fn renderInline(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    aliases: *const StringMap,
+) ![]u8 {
+    // Fast path: no @style(...) found → just escape
+    if (std.mem.indexOf(u8, text, "@style(") == null) {
+        return escapeHtml(allocator, text);
+    }
+    return rewriteInlineStyleDirectives(allocator, text, aliases);
+}
+
+// ──────────────────────────
+// Tests
+// ──────────────────────────
+
+test "escapeHtml basics" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    const out = try escapeHtml(A, "<a & b>");
+    defer A.free(out);
+    try std.testing.expectEqualStrings("&lt;a &amp; b&gt;", out);
+}
+
+test "rewriteInlineStyleDirectives: classes attr" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    var aliases = StringMap.init(A);
+    defer {
+        var it = aliases.iterator();
+        while (it.next()) |e| {
+            A.free(e.key_ptr.*);
+            // values are borrowed; nothing to free
+        }
+        aliases.deinit();
+    }
+
+    const s =
+        \\Before @style(classes:"hl red") hot @end after
+    ;
+    const out = try rewriteInlineStyleDirectives(A, s, &aliases);
+    defer A.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "Before ") == 0);
+    try std.testing.expect(std.mem.indexOf(u8, out, "<span class=\"hl red\">hot</span>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, " after") != null);
+}
+
+test "rewriteInlineStyleDirectives: name alias lookup" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    var aliases = StringMap.init(A);
+    defer {
+        var it = aliases.iterator();
+        while (it.next()) |e| {
+            A.free(e.key_ptr.*);
+        }
+        aliases.deinit();
+    }
+    try aliases.put(try A.dupe(u8, "emph"), "italic text-emphasis");
+
+    const s = "The @style(name:\"emph\") preview @end works.";
+    const out = try rewriteInlineStyleDirectives(A, s, &aliases);
+    defer A.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "<span class=\"italic text-emphasis\">preview</span>") != null);
+}
+
+test "rewriteInlineStyleDirectives: style attr" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    var aliases = StringMap.init(A);
+    defer {
+        var it = aliases.iterator();
+        while (it.next()) |e| {
+            A.free(e.key_ptr.*);
+        }
+        aliases.deinit();
+    }
+
+    const s = "X @style(style:\"color:red; font-weight:bold\") Y @end Z";
+    const out = try rewriteInlineStyleDirectives(A, s, &aliases);
+    defer A.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "<span style=\"color:red; font-weight:bold\">Y</span>") != null);
+}
+
+test "renderInline escapes when no directive present" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+    var aliases = StringMap.init(A);
+    defer {
+        var it = aliases.iterator();
+        while (it.next()) |e| A.free(e.key_ptr.*);
+        aliases.deinit();
+    }
+
+    const s = "1 < 2 & 3 > 2";
+    const out = try renderInline(A, s, &aliases);
+    defer A.free(out);
+    try std.testing.expectEqualStrings("1 &lt; 2 &amp; 3 &gt; 2", out);
+}
+
+test "malformed @style falls back to literal (escaped)" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+    var aliases = StringMap.init(A);
+    defer {
+        var it = aliases.iterator();
+        while (it.next()) |e| A.free(e.key_ptr.*);
+        aliases.deinit();
+    }
+
+    const s = "Bad @style(class:\"oops\" no close";
+    const out = try renderInline(A, s, &aliases);
+    defer A.free(out);
+    // We didn't crash; we escaped the literal tail
+    try std.testing.expect(std.mem.indexOf(u8, out, "@style(") != null);
+}
+```
+
+4. `docz/src/convert/html/export.zig`:
+
+```
+const std = @import("std");
+const docz = @import("docz"); // public module root
+const ASTNode = docz.AST.ASTNode;
+const NodeType = docz.AST.NodeType;
+
+// ─────────────────────────────────────────────────────────────
+// Utilities
+// ─────────────────────────────────────────────────────────────
+
+const InlineStyleAttrs = struct {
+    class_attr: ?[]const u8 = null,
+    classes: ?[]const u8 = null,
+    style: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+};
+
+fn isSpace(b: u8) bool {
+    return b == ' ' or b == '\t' or b == '\r' or b == '\n';
+}
+
+fn eqLower(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var i: usize = 0;
+    while (i < a.len) : (i += 1) {
+        const aa = a[i];
+        const bb = b[i];
+        const la = if (aa >= 'A' and aa <= 'Z') aa + 32 else aa;
+        const lb = if (bb >= 'A' and bb <= 'Z') bb + 32 else bb;
+        if (la != lb) return false;
+    }
+    return true;
+}
+fn lowerAscii(c: u8) u8 {
+    return if (c >= 'A' and c <= 'Z') c + 32 else c;
+}
+
+fn escapeHtmlAttr(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+
+    for (s) |ch| {
+        switch (ch) {
+            '&' => try out.appendSlice("&amp;"),
+            '"' => try out.appendSlice("&quot;"),
+            '<' => try out.appendSlice("&lt;"),
+            '>' => try out.appendSlice("&gt;"),
+            else => try out.append(ch),
+        }
+    }
+    return out.toOwnedSlice();
+}
+
+/// Decode a handful of HTML entity forms that we expect to see inside already-escaped paragraph text.
+fn decodeHtmlQuoteEntities(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+
+    var i: usize = 0;
+    while (i < s.len) {
+        if (std.mem.startsWith(u8, s[i..], "&quot;")) {
+            try out.append('"');
+            i += "&quot;".len;
+            continue;
+        }
+        if (std.mem.startsWith(u8, s[i..], "&#34;")) {
+            try out.append('"');
+            i += "&#34;".len;
+            continue;
+        }
+        try out.append(s[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice();
+}
+
+fn classLooksLikeCss(s: []const u8) bool {
+    return std.mem.indexOfScalar(u8, s, ':') != null or std.mem.indexOfScalar(u8, s, '=') != null;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Head helpers
+// ─────────────────────────────────────────────────────────────
+
+fn writeHeadFromMeta(root: *const ASTNode, w: anytype) !void {
+    var wrote_title = false;
+
+    for (root.children.items) |node| {
+        if (node.node_type != .Meta) continue;
+
+        var it = node.attributes.iterator();
+        while (it.next()) |entry| {
+            const k = entry.key_ptr.*;
+            const v = entry.value_ptr.*;
+            if (std.ascii.eqlIgnoreCase(k, "title")) {
+                if (!wrote_title) {
+                    try w.print("<title>{s}</title>\n", .{v});
+                    wrote_title = true;
+                }
+            } else {
+                try w.print("<meta name=\"{s}\" content=\"{s}\">\n", .{ k, v });
+            }
+        }
+    }
+}
+
+fn writeImports(root: *const ASTNode, w: anytype) !void {
+    for (root.children.items) |node| {
+        if (node.node_type != .Import) continue;
+        const href = node.attributes.get("href") orelse "";
+        if (href.len != 0) {
+            try w.print("<link rel=\"stylesheet\" href=\"{s}\">\n", .{href});
+        }
+    }
+}
+
+fn writeDefaultCssLink(root: *const ASTNode, w: anytype) !void {
+    var href: []const u8 = "";
+    var found = false;
+
+    for (root.children.items) |node| {
+        if (node.node_type != .Meta) continue;
+        if (node.attributes.get("default_css")) |v| {
+            href = v;
+            found = true;
+        }
+    }
+
+    if (found and href.len != 0) {
+        try w.print("<link rel=\"stylesheet\" href=\"{s}\">\n", .{href});
+    }
+}
+
+fn writeInlineCss(root: *const ASTNode, w: anytype) !void {
+    var opened = false;
+    for (root.children.items) |node| {
+        if (node.node_type != .Css) continue;
+        if (!opened) {
+            try w.writeAll("<style>\n");
+            opened = true;
+        }
+        if (node.content.len != 0) {
+            try w.writeAll(node.content);
+            try w.writeAll("\n");
+        }
+    }
+    if (opened) try w.writeAll("</style>\n");
+}
+
+// ─────────────────────────────────────────────────────────────
+// Style alias support
+// ─────────────────────────────────────────────────────────────
+
+fn buildStyleAliases(doc: *const ASTNode, allocator: std.mem.Allocator) !std.StringHashMap([]const u8) {
+    var out = std.StringHashMap([]const u8).init(allocator);
+    errdefer {
+        var itf = out.iterator();
+        while (itf.next()) |e| {
+            allocator.free(e.key_ptr.*);
+            allocator.free(e.value_ptr.*);
+        }
+        out.deinit();
+    }
+
+    for (doc.children.items) |node| {
+        if (node.node_type != .StyleDef) continue;
+
+        var parsed = try node.parseStyleAliases(allocator);
+
+        var it = parsed.iterator();
+        while (it.next()) |e| {
+            const alias = e.key_ptr.*;
+            const classes = e.value_ptr.*;
+
+            const gop = try out.getOrPut(try allocator.dupe(u8, alias));
+            if (gop.found_existing) {
+                allocator.free(gop.key_ptr.*); // drop duplicate insert key
+                allocator.free(gop.value_ptr.*);
+                gop.value_ptr.* = try allocator.dupe(u8, classes);
+            } else {
+                gop.value_ptr.* = try allocator.dupe(u8, classes);
+            }
+        }
+
+        var itp = parsed.iterator();
+        while (itp.next()) |e| {
+            allocator.free(e.key_ptr.*);
+            allocator.free(e.value_ptr.*);
+        }
+        parsed.deinit();
+    }
+
+    return out;
+}
+
+fn resolveStyleClasses(style_node: *const ASTNode, aliases: *const std.StringHashMap([]const u8)) []const u8 {
+    if (style_node.attributes.get("classes")) |cls| return cls;
+    if (style_node.attributes.get("name")) |alias| {
+        if (aliases.get(alias)) |resolved| return resolved;
+    }
+    return "";
+}
+
+// ─────────────────────────────────────────────────────────────
+// Debug helpers (opt-in with @meta(debug_css="true"))
+// ─────────────────────────────────────────────────────────────
+
+fn metaFlag(root: *const ASTNode, key: []const u8) bool {
+    for (root.children.items) |node| {
+        if (node.node_type != .Meta) continue;
+        if (node.attributes.get(key)) |v| {
+            if (std.ascii.eqlIgnoreCase(v, "true") or std.ascii.eqlIgnoreCase(v, "1")) return true;
+        }
+    }
+    return false;
+}
+
+fn collectImports(root: *const ASTNode, allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
+    var list = std.ArrayList([]const u8).init(allocator);
+    errdefer {
+        for (list.items) |s| allocator.free(s);
+        list.deinit();
+    }
+    for (root.children.items) |node| {
+        if (node.node_type != .Import) continue;
+        if (node.attributes.get("href")) |href| {
+            try list.append(try allocator.dupe(u8, href));
+        }
+    }
+    return list;
+}
+
+fn mergeCss(root: *const ASTNode, allocator: std.mem.Allocator) ![]u8 {
+    var buf = std.ArrayList(u8).init(allocator);
+    errdefer buf.deinit();
+
+    for (root.children.items) |node| {
+        if (node.node_type != .Css) continue;
+        if (node.content.len != 0) {
+            try buf.appendSlice(node.content);
+            try buf.append('\n');
+        }
+    }
+    return buf.toOwnedSlice();
+}
+
+fn writeDebugCssBanner(root: *const ASTNode, w: anytype, allocator: std.mem.Allocator) !void {
+    if (!metaFlag(root, "debug_css")) return;
+
+    try w.writeAll("<style>body{background:#fffbe6}</style>\n");
+
+    var imports = try collectImports(root, allocator);
+    defer {
+        for (imports.items) |s| allocator.free(s);
+        imports.deinit();
+    }
+
+    const css = try mergeCss(root, allocator);
+    defer allocator.free(css);
+
+    try w.writeAll(
+        \\<div style="font:13px/1.4 system-ui, sans-serif; background:#fffbcc; color:#222; border-bottom:1px solid #e6db55; padding:10px; margin:0 0 10px 0">
+        \\  <strong>Docz CSS Debug</strong><br>
+        \\  Css blocks: 
+    );
+
+    var css_count: usize = 0;
+    for (root.children.items) |node| {
+        if (node.node_type == .Css) css_count += 1;
+    }
+    try w.print("{d}", .{css_count});
+
+    try w.writeAll(" &middot; Imports: ");
+    try w.print("{d}", .{imports.items.len});
+    try w.writeAll("<br>\n");
+
+    if (imports.items.len > 0) {
+        try w.writeAll("  <div>Links:<ul style=\"margin:4px 0 0 18px\">");
+        for (imports.items) |href| try w.print("<li><code>{s}</code></li>", .{href});
+        try w.writeAll("</ul></div>\n");
+    }
+
+    const preview_len: usize = if (css.len > 800) 800 else css.len;
+    try w.writeAll("  <div>Inline &lt;style&gt; preview:</div>\n");
+    try w.writeAll("  <pre style=\"white-space:pre-wrap; background:#111; color:#eee; padding:8px; border-radius:6px; margin:6px 0 0 0\">");
+    try w.writeAll(css[0..preview_len]);
+    if (css.len > preview_len) try w.writeAll("\n…(truncated)...");
+    try w.writeAll("</pre>\n</div>\n");
+}
+
+// ─────────────────────────────────────────────────────────────
+// Inline @style(...)…@end rewriter (works in already-HTML-inline paragraphs)
+// ─────────────────────────────────────────────────────────────
+
+/// Parse inside "(...)" — tolerant to key="...", key:"...", spaces, and &quot;.
+/// Only extracts: class/classes, style, name
+fn parseInlineStyleAttrsAlloc(allocator: std.mem.Allocator, raw: []const u8) !InlineStyleAttrs {
+    var attrs: InlineStyleAttrs = .{};
+
+    // We decode entities into a temp buffer, *but we dupe any values we keep*
+    const unquoted = try decodeHtmlQuoteEntities(allocator, raw);
+    defer allocator.free(unquoted);
+
+    var i: usize = 0;
+    while (i < unquoted.len) {
+        while (i < unquoted.len and (isSpace(unquoted[i]) or unquoted[i] == ',')) : (i += 1) {}
+        if (i >= unquoted.len) break;
+
+        const ks = i;
+        while (i < unquoted.len) : (i += 1) {
+            const ch = unquoted[i];
+            if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-')) break;
+        }
+        const ke = i;
+        if (ke == ks) {
+            i += 1;
+            continue;
+        }
+        const key = std.mem.trim(u8, unquoted[ks..ke], " \t\r\n");
+
+        while (i < unquoted.len and isSpace(unquoted[i])) : (i += 1) {}
+        if (i < unquoted.len and (unquoted[i] == '=' or unquoted[i] == ':')) i += 1;
+        while (i < unquoted.len and isSpace(unquoted[i])) : (i += 1) {}
+
+        var val: []const u8 = "";
+        if (i < unquoted.len and unquoted[i] == '"') {
+            i += 1;
+            const vs = i;
+            while (i < unquoted.len and unquoted[i] != '"') : (i += 1) {}
+            const ve = if (i <= unquoted.len) i else unquoted.len;
+            val = unquoted[vs..ve];
+            if (i < unquoted.len and unquoted[i] == '"') i += 1;
+        } else {
+            const vs2 = i;
+            while (i < unquoted.len and unquoted[i] != ',' and unquoted[i] != ')') : (i += 1) {}
+            val = std.mem.trim(u8, unquoted[vs2..i], " \t\r\n");
+        }
+
+        // Duplicate val slices we keep so they survive past this function.
+        if (eqLower(key, "class") or eqLower(key, "classes")) {
+            const copy = try allocator.dupe(u8, val);
+            attrs.class_attr = copy;
+            attrs.classes = copy;
+        } else if (eqLower(key, "style")) {
+            attrs.style = try allocator.dupe(u8, val);
+        } else if (eqLower(key, "name")) {
+            attrs.name = try allocator.dupe(u8, val);
+        }
+    }
+
+    return attrs;
+}
+
+fn freeInlineStyleAttrs(allocator: std.mem.Allocator, a: *InlineStyleAttrs) void {
+    // Only free what we allocated in parseInlineStyleAttrsAlloc.
+    // Note: class_attr and classes may alias the same buffer; free once.
+    // We free via classes and null out both.
+    if (a.classes) |buf| {
+        allocator.free(buf);
+        a.classes = null;
+        a.class_attr = null;
+    }
+    if (a.style) |buf| {
+        allocator.free(buf);
+        a.style = null;
+    }
+    if (a.name) |buf| {
+        allocator.free(buf);
+        a.name = null;
+    }
+}
+
+/// Rewrites all `@style(...) ... @end` inside a paragraph string.
+/// Tolerates extra spaces: `@style (...)` and handles `&quot;` in attr list.
+/// If malformed (missing `)` or `@end`), leaves the remainder untouched.
+pub fn rewriteInlineStyleDirectives(
+    allocator: std.mem.Allocator,
+    s: []const u8,
+    aliases: *const std.StringHashMap([]const u8),
+) ![]u8 {
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+
+    var i: usize = 0;
+    const open_tag = "@style(";
+    const end_tag = "@end";
+
+    while (i < s.len) {
+        // Find next "@style("
+        const at_opt = std.mem.indexOfPos(u8, s, i, open_tag);
+        if (at_opt == null) {
+            try out.appendSlice(s[i..]);
+            break;
+        }
+        const at = at_opt.?;
+
+        // Emit literal prefix
+        try out.appendSlice(s[i..at]);
+
+        // Parse "(...)"
+        const attrs_start = at + open_tag.len;
+        const close_paren_opt = std.mem.indexOfScalarPos(u8, s, attrs_start, ')');
+        if (close_paren_opt == null) {
+            // Malformed → emit rest literally
+            try out.appendSlice(s[at..]);
+            break;
+        }
+        const close_paren = close_paren_opt.?;
+        const attrs_text = s[attrs_start..close_paren];
+
+        // NOTE: must be 'var' so we can free() it later
+        var attrs = try parseInlineStyleAttrsAlloc(allocator, attrs_text);
+        defer freeInlineStyleAttrs(allocator, &attrs);
+
+        // After ')', skip space then capture until "@end"
+        var p = close_paren + 1;
+        while (p < s.len and isSpace(s[p])) : (p += 1) {}
+        const end_opt = std.mem.indexOfPos(u8, s, p, end_tag);
+        if (end_opt == null) {
+            // Malformed → emit rest literally
+            try out.appendSlice(s[at..]);
+            break;
+        }
+        const end_idx = end_opt.?;
+        const inner = s[p..end_idx];
+
+        // Render precedence: style= → class(es)=/class= → alias(name=) → fallback(class looks like CSS?)
+        if (attrs.style) |sty_raw| {
+            const sty = try escapeHtmlAttr(allocator, sty_raw);
+            defer allocator.free(sty);
+
+            try out.appendSlice("<span style=\"");
+            try out.appendSlice(sty);
+            try out.appendSlice("\">");
+            try out.appendSlice(inner);
+            try out.appendSlice("</span>");
+        } else {
+            var cls_choice: ?[]const u8 = null;
+
+            if (attrs.classes) |cls_raw| {
+                cls_choice = cls_raw; // owned by attrs
+            } else if (attrs.name) |nm| {
+                if (aliases.get(nm)) |resolved| {
+                    cls_choice = resolved; // borrowed from aliases
+                }
+            } else if (attrs.class_attr) |maybe| {
+                if (classLooksLikeCss(maybe)) {
+                    const sty2 = try escapeHtmlAttr(allocator, maybe);
+                    defer allocator.free(sty2);
+
+                    try out.appendSlice("<span style=\"");
+                    try out.appendSlice(sty2);
+                    try out.appendSlice("\">");
+                    try out.appendSlice(inner);
+                    try out.appendSlice("</span>");
+
+                    i = end_idx + end_tag.len;
+                    continue;
+                } else {
+                    cls_choice = maybe; // treat as class list
+                }
+            }
+
+            if (cls_choice) |cls_raw2| {
+                const cls = try escapeHtmlAttr(allocator, cls_raw2);
+                defer allocator.free(cls);
+
+                try out.appendSlice("<span class=\"");
+                try out.appendSlice(cls);
+                try out.appendSlice("\">");
+                try out.appendSlice(inner);
+                try out.appendSlice("</span>");
+            } else {
+                // No usable attrs → drop wrapper
+                try out.appendSlice(inner);
+            }
+        }
+
+        // Advance past "@end"
+        i = end_idx + end_tag.len;
+    }
+
+    return out.toOwnedSlice();
+}
+
+// ─────────────────────────────────────────────────────────────
+// Body writer
+// ─────────────────────────────────────────────────────────────
+
+fn writeBodyFromAst(
+    root: *const docz.AST.ASTNode,
+    w: anytype,
+    allocator: std.mem.Allocator,
+    aliases: *const std.StringHashMap([]const u8),
+) !void {
+    for (root.children.items) |node| {
+        switch (node.node_type) {
+            .Meta => {},
+            .Heading => {
+                const level = node.attributes.get("level") orelse "1";
+                const text = std.mem.trimRight(u8, node.content, " \t\r\n");
+                try w.print("<h{s}>{s}</h{s}>\n", .{ level, text, level });
+            },
+            .Content => {
+                const text = std.mem.trimRight(u8, node.content, " \t\r\n");
+                if (text.len == 0) break;
+
+                if (std.mem.indexOf(u8, text, "@style") != null) {
+                    const rewritten = try rewriteInlineStyleDirectives(allocator, text, aliases);
+                    defer allocator.free(rewritten);
+                    try w.print("<p>{s}</p>\n", .{rewritten});
+                } else {
+                    try w.print("<p>{s}</p>\n", .{text});
+                }
+            },
+            .CodeBlock => {
+                try w.print("<pre><code>{s}</code></pre>\n", .{node.content});
+            },
+            .Math => {
+                try w.print("<div class=\"math\">{s}</div>\n", .{node.content});
+            },
+            .Media => {
+                const src = node.attributes.get("src") orelse "";
+                if (src.len != 0) try w.print("<img src=\"{s}\" />\n", .{src});
+            },
+            .Import, .Css, .StyleDef => {},
+            .Style => {
+                const classes = resolveStyleClasses(&node, aliases);
+                if (classes.len != 0) {
+                    try w.print("<div class=\"{s}\">{s}</div>\n", .{ classes, node.content });
+                } else {
+                    try w.print("<div>{s}</div>\n", .{node.content});
+                }
+            },
+            else => {
+                try w.print("<!-- Unhandled node: {s} -->\n", .{@tagName(node.node_type)});
+            },
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Public helpers for CLI (CSS externalization path)
+// ─────────────────────────────────────────────────────────────
+
+pub fn collectInlineCss(root: *const ASTNode, allocator: std.mem.Allocator) ![]u8 {
+    var buf = std.ArrayList(u8).init(allocator);
+    errdefer buf.deinit();
+
+    for (root.children.items) |node| {
+        if (node.node_type != .Css) continue;
+        if (node.content.len != 0) {
+            try buf.appendSlice(node.content);
+            try buf.append('\n');
+        }
+    }
+    return buf.toOwnedSlice();
+}
+
+pub fn stripFirstStyleBlock(html: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    const open_tag_needle = "<style";
+    const close_tag_needle = "</style>";
+
+    const open_idx_opt = std.mem.indexOf(u8, html, open_tag_needle);
+    if (open_idx_opt == null) {
+        return try allocator.dupe(u8, html);
+    }
+    const open_idx = open_idx_opt.?;
+
+    const gt_idx_opt = std.mem.indexOfScalarPos(u8, html, open_idx, '>');
+    if (gt_idx_opt == null) {
+        return try allocator.dupe(u8, html);
+    }
+    const open_gt = gt_idx_opt.? + 1;
+
+    const close_idx_opt = std.mem.indexOfPos(u8, html, open_gt, close_tag_needle);
+    if (close_idx_opt == null) {
+        return try allocator.dupe(u8, html);
+    }
+    const close_idx = close_idx_opt.?;
+    const close_end = close_idx + close_tag_needle.len;
+
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+
+    try out.appendSlice(html[0..open_idx]);
+    if (out.items.len > 0 and out.items[out.items.len - 1] == '\n') {
+        _ = out.pop();
+    }
+    try out.appendSlice(html[close_end..]);
+
+    return out.toOwnedSlice();
+}
+
+// ─────────────────────────────────────────────────────────────
+// Public API
+// ─────────────────────────────────────────────────────────────
+
+pub fn exportHtml(doc: *const ASTNode, allocator: std.mem.Allocator) ![]u8 {
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+    const w = out.writer();
+
+    var aliases = try buildStyleAliases(doc, allocator);
+    defer {
+        var it = aliases.iterator();
+        while (it.next()) |e| {
+            allocator.free(e.key_ptr.*);
+            allocator.free(e.value_ptr.*);
+        }
+        aliases.deinit();
+    }
+
+    try w.writeAll("<!DOCTYPE html>\n<html>\n  <head>\n    <meta charset=\"utf-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n");
+    try writeHeadFromMeta(doc, w);
+    try writeImports(doc, w);
+    try writeDefaultCssLink(doc, w);
+    try writeInlineCss(doc, w);
+    try w.writeAll("  </head>\n  <body>\n");
+
+    try writeDebugCssBanner(doc, w, allocator);
+    try writeBodyFromAst(doc, w, allocator, &aliases);
+
+    try w.writeAll("  </body>\n</html>\n");
+    return out.toOwnedSlice();
+}
+
+// ─────────────────────────────────────────────────────────────
+// Tests (focused on the inline @style rewrite)
+// ─────────────────────────────────────────────────────────────
+
+test "rewriteInlineStyleDirectives: class with HTML-escaped &quot;" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    var aliases = std.StringHashMap([]const u8).init(A);
+    defer aliases.deinit();
+
+    const para =
+        "The @style(class=&quot;color = red&quot;) preview @end server exposes...";
+    const out = try rewriteInlineStyleDirectives(A, para, &aliases);
+    defer A.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "<span class=\"color = red\">preview </span>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "@style(") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "@end") == null);
+}
+
+test "rewriteInlineStyleDirectives: style= + inner kept intact" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    var aliases = std.StringHashMap([]const u8).init(A);
+    defer aliases.deinit();
+
+    const para =
+        "A @style(style:\"font-weight:bold\") <em>word</em> @end here.";
+    const out = try rewriteInlineStyleDirectives(A, para, &aliases);
+    defer A.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "<span style=\"font-weight:bold\">") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "<em>word</em>") != null);
+}
+
+test "exportHtml integrates inline rewrite for Content node" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    var root = ASTNode.init(A, NodeType.Document);
+    defer root.deinit();
+
+    // Paragraph with inline directive (with &quot;)
+    {
+        var p = ASTNode.init(A, NodeType.Content);
+        p.content = "The @style(class=&quot;color = red&quot;) preview @end server.";
+        try root.children.append(p);
+    }
+
+    const html = try exportHtml(&root, A);
+    defer A.free(html);
+
+    try std.testing.expect(std.mem.indexOf(u8, html, "<p>The <span class=\"color = red\">preview </span> server.</p>") != null);
+}
+```
+
+5. `docz/src/cli/run.zig`:
+
+```
+const std = @import("std");
+const docz = @import("docz");
+const common = @import("./common.zig");
+
+const assets = @import("./assets.zig");
+const html_ops = @import("./html_ops.zig");
+const fallback = @import("./fallback.zig");
+
+// ─────────────────────────────────────────────────────────────
+// Embedded core CSS (shipped with Docz)
+// ─────────────────────────────────────────────────────────────
+const CORE_CSS_BYTES: []const u8 = docz.assets.core_css;
+const CORE_CSS_NAME: []const u8 = "docz.core.css";
+const TAILWIND_CSS_NAME: []const u8 = "docz.tailwind.css";
+
+// ───────── Live reload marker name ─────────
+const LIVE_MARKER = "__docz_hot.txt";
+
+const CssMode = enum { inline_css, file };
+
+const GenerateOpts = struct {
+    css_mode: CssMode = .inline_css,
+    pretty: bool = true,
+    live_reload: bool = true,
+    css_file_name: []const u8 = "docz.css",
+};
+
+// ─────────────────────────────────────────────────────────────
+// Preview helpers (spawn/open)
+// ─────────────────────────────────────────────────────────────
+
+fn spawnPreview(alloc: std.mem.Allocator, root_dir: []const u8, port: u16) !std.process.Child {
+    const exe_path = try std.fs.selfExePathAlloc(alloc);
+    defer alloc.free(exe_path);
+
+    var argv = std.ArrayList([]const u8).init(alloc);
+    errdefer argv.deinit();
+
+    try argv.append(exe_path);
+    try argv.append("preview");
+    try argv.append("--root");
+    try argv.append(root_dir);
+    try argv.append("--port");
+    const port_str = try std.fmt.allocPrint(alloc, "{}", .{port});
+    defer alloc.free(port_str);
+    try argv.append(port_str);
+    try argv.append("--no-open"); // run opens the browser
+
+    var child = std.process.Child.init(argv.items, alloc);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    try child.spawn();
+
+    return child;
+}
+
+fn openBrowserToIndex(alloc: std.mem.Allocator, port: u16) !void {
+    const url = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}/index.html", .{port});
+    defer alloc.free(url);
+
+    const os = @import("builtin").os.tag;
+    const argv = switch (os) {
+        .windows => &[_][]const u8{ "cmd", "/c", "start", url },
+        .macos => &[_][]const u8{ "open", url },
+        else => &[_][]const u8{ "xdg-open", url },
+    };
+
+    var child = std.process.Child.init(argv, alloc);
+    _ = child.spawn() catch {};
+}
+
+// ─────────────────────────────────────────────────────────────
+// One-shot generate to .zig-cache/docz-run
+// ─────────────────────────────────────────────────────────────
+
+fn generateOnce(
+    alloc: std.mem.Allocator,
+    dcz_path: []const u8,
+    out_dir: []const u8,
+    opts: GenerateOpts,
+) !void {
+    // 0) Read input and render a full HTML document (<head> + <body>)
+    const input = try common.readFileAlloc(alloc, dcz_path);
+    defer alloc.free(input);
+
+    var final_html = try fallback.render(alloc, input);
+    defer alloc.free(final_html);
+
+    // 1) Core CSS — write file and link FIRST
+    {
+        const core_out = try std.fs.path.join(alloc, &.{ out_dir, CORE_CSS_NAME });
+        defer alloc.free(core_out);
+        try common.writeFile(core_out, CORE_CSS_BYTES);
+
+        const linked_core = try html_ops.insertCssLinkBeforeHeadClose(alloc, final_html, CORE_CSS_NAME);
+        alloc.free(final_html);
+        final_html = linked_core;
+    }
+
+    // 2) Optional external CSS (empty/stub or user-provided path name)
+    if (opts.css_mode == .file) {
+        const css_out = try std.fs.path.join(alloc, &.{ out_dir, opts.css_file_name });
+        defer alloc.free(css_out);
+        // Write an empty file if caller didn't already generate one upstream.
+        try common.writeFile(css_out, "");
+
+        const linked = try html_ops.insertCssLinkBeforeHeadClose(alloc, final_html, opts.css_file_name);
+        alloc.free(final_html);
+        final_html = linked;
+    }
+
+    // 3) Tailwind (vendored or monorepo build) — link LAST among CSS if discovered
+    if (assets.findTailwindCss(alloc) catch null) |src_tw| {
+        defer alloc.free(src_tw);
+
+        const tw_out = try std.fs.path.join(alloc, &.{ out_dir, TAILWIND_CSS_NAME });
+        defer alloc.free(tw_out);
+        try assets.copyFileStreaming(src_tw, tw_out);
+
+        const linked_tw = try html_ops.insertCssLinkBeforeHeadClose(alloc, final_html, TAILWIND_CSS_NAME);
+        alloc.free(final_html);
+        final_html = linked_tw;
+    }
+
+    // 4) KaTeX (vendored) — inject assets + init script if available
+    if (assets.findKatexAssets(alloc) catch null) |k| {
+        defer {
+            alloc.free(k.css_href);
+            alloc.free(k.js_href);
+            alloc.free(k.auto_href);
+        }
+
+        var sn = std.ArrayList(u8).init(alloc);
+        errdefer sn.deinit();
+
+        // <link rel="stylesheet" href="...katex.min.css">
+        try sn.appendSlice("<link rel=\"stylesheet\" href=\"");
+        try sn.appendSlice(k.css_href);
+        try sn.appendSlice("\">\n");
+
+        // <script defer src="...katex.min.js"></script>
+        try sn.appendSlice("<script defer src=\"");
+        try sn.appendSlice(k.js_href);
+        try sn.appendSlice("\"></script>\n");
+
+        // <script defer src="...auto-render.min.js"></script>
+        try sn.appendSlice("<script defer src=\"");
+        try sn.appendSlice(k.auto_href);
+        try sn.appendSlice("\"></script>\n");
+
+        // Inline init (trust: true so \htmlClass/\htmlId/\htmlStyle/\htmlData work)
+        // + gentle strictness and throwOnError:false for authoring friendliness.
+        // Also add a convenience macro \class → \htmlClass for nicer authoring.
+        try sn.appendSlice(
+            \\<script>
+            \\document.addEventListener('DOMContentLoaded', function () {
+            \\  if (!window.renderMathInElement) return;
+            \\  renderMathInElement(document.body, {
+            \\    delimiters: [
+            \\      {left: "$$", right: "$$", display: true},
+            \\      {left: "$",  right: "$",  display: false},
+            \\      {left: "\\(", right: "\\)", display: false},
+            \\      {left: "\\[", right: "\\]", display: true}
+            \\    ],
+            \\    throwOnError: false,
+            \\    strict: "ignore",
+            \\    trust: true,
+            \\    macros: {
+            \\      "\\\\class": "\\\\htmlClass"
+            \\    }
+            \\  });
+            \\});
+            \\</script>
+            \\
+        );
+
+        const snippet = try sn.toOwnedSlice();
+        const injected = try html_ops.insertBeforeHeadClose(alloc, final_html, snippet);
+        alloc.free(final_html);
+        final_html = injected;
+        alloc.free(snippet);
+    }
+
+    // 5) Live reload (dev) — small script + hot marker file
+    if (opts.live_reload) {
+        const with_live = try html_ops.injectLiveScript(alloc, final_html, LIVE_MARKER);
+        alloc.free(final_html);
+        final_html = with_live;
+    }
+
+    // 6) Pretty print (optional, cheap)
+    if (opts.pretty) {
+        const pretty = try html_ops.prettyHtml(alloc, final_html);
+        alloc.free(final_html);
+        final_html = pretty;
+    }
+
+    // 7) Write HTML and update hot marker last (after file is fully written)
+    const html_out = try std.fs.path.join(alloc, &.{ out_dir, "index.html" });
+    defer alloc.free(html_out);
+    try common.writeFile(html_out, final_html);
+
+    if (opts.live_reload) try html_ops.writeHotMarker(alloc, out_dir, LIVE_MARKER);
+}
+
+// -----------------------------------------------------------------------------
+// CLI
+// -----------------------------------------------------------------------------
+
+pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
+    const usage =
+        \\Usage: docz run <path.dcz> [--port <num>] [--css inline|file] [--no-pretty] [--no-live] [--config <file>]
+        \\Notes:
+        \\  - Compiles to a temp dir and serves it via `docz preview`
+        \\  - Rebuilds + auto-reloads the browser when the .dcz changes
+        \\
+    ;
+
+    const dcz_path = it.next() orelse {
+        std.debug.print("{s}", .{usage});
+        return error.Invalid;
+    };
+
+    // Defaults, optionally from config file
+    var cfg_path: ?[]const u8 = null;
+    var port_overridden = false;
+
+    var settings = common.Settings{}; // defaults
+    settings = common.loadSettings(alloc, null) catch settings;
+
+    var port: u16 = settings.port;
+
+    var css_mode: CssMode = .inline_css;
+    var pretty: bool = true;
+    var live_reload: bool = true;
+
+    while (it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--port")) {
+            const v = it.next() orelse {
+                std.debug.print("run: --port requires a value\n", .{});
+                return error.Invalid;
+            };
+            port = std.fmt.parseInt(u16, v, 10) catch {
+                std.debug.print("run: invalid port: {s}\n", .{v});
+                return error.Invalid;
+            };
+            port_overridden = true;
+        } else if (std.mem.eql(u8, arg, "--css")) {
+            const v = it.next() orelse {
+                std.debug.print("run: --css requires a value: inline|file\n", .{});
+                return error.Invalid;
+            };
+            if (std.mem.eql(u8, v, "inline")) css_mode = .inline_css else if (std.mem.eql(u8, v, "file")) css_mode = .file else {
+                std.debug.print("run: --css must be 'inline' or 'file' (got '{s}')\n", .{v});
+                return error.Invalid;
+            }
+        } else if (std.mem.eql(u8, arg, "--no-pretty")) {
+            pretty = false;
+        } else if (std.mem.eql(u8, arg, "--no-live")) {
+            live_reload = false;
+        } else if (std.mem.eql(u8, arg, "--config")) {
+            const v = it.next() orelse {
+                std.debug.print("run: --config requires a value\n", .{});
+                return error.Invalid;
+            };
+            cfg_path = v;
+            const s2 = common.loadSettings(alloc, cfg_path) catch settings;
+            settings = s2;
+            if (!port_overridden) port = settings.port;
+        } else {
+            std.debug.print("run: unknown arg: {s}\n", .{arg});
+            return error.Invalid;
+        }
+    }
+
+    // temp out dir inside zig-cache (portable & disposable)
+    const tmp_root = try std.fs.path.join(alloc, &.{ ".zig-cache", "docz-run" });
+    defer alloc.free(tmp_root);
+    try std.fs.cwd().makePath(tmp_root);
+
+    // initial build
+    try generateOnce(alloc, dcz_path, tmp_root, .{
+        .css_mode = css_mode,
+        .pretty = pretty,
+        .live_reload = live_reload,
+    });
+
+    // start preview server
+    var preview = try spawnPreview(alloc, tmp_root, port);
+    defer {
+        _ = preview.kill() catch {};
+        _ = preview.wait() catch {};
+    }
+
+    // open browser directly to the compiled HTML
+    openBrowserToIndex(alloc, port) catch {};
+
+    std.debug.print(
+        "Serving on http://127.0.0.1:{d}  (dir: {s})  [live={any}]\n",
+        .{ port, tmp_root, live_reload },
+    );
+
+    // watch loop (poll .dcz mtime)
+    var last = try assets.fileMTime(dcz_path);
+    while (true) {
+        std.Thread.sleep(250 * std.time.ns_per_ms);
+
+        const now = assets.fileMTime(dcz_path) catch continue;
+        if (now != last) {
+            last = now;
+            generateOnce(alloc, dcz_path, tmp_root, .{
+                .css_mode = css_mode,
+                .pretty = pretty,
+                .live_reload = live_reload,
+            }) catch |e| {
+                std.debug.print("run: rebuild failed: {s}\n", .{@errorName(e)});
+            };
+        }
+    }
+}
+```
+
+6. `docz/src/cli/assets.zig`:
+
+```
+const std = @import("std");
+
+// Prefer monorepo-built theme if present,
+// otherwise choose newest vendored theme by mtime (tie-break lexicographically).
+pub fn findTailwindCss(alloc: std.mem.Allocator) !?[]u8 {
+    // 1) Monorepo theme (takes priority)
+    const mono_css = "themes/default/dist/docz.tailwind.css";
+    const mono_ok = blk1: {
+        std.fs.cwd().access(mono_css, .{}) catch break :blk1 false;
+        break :blk1 true;
+    };
+    if (mono_ok) return try alloc.dupe(u8, mono_css);
+
+    // 2) Vendored: third_party/tailwind/docz-theme-*/css/docz.tailwind.css
+    const root = "third_party/tailwind";
+    var dir = std.fs.cwd().openDir(root, .{ .iterate = true }) catch |e| {
+        if (e == error.FileNotFound) return null;
+        return e;
+    };
+    defer dir.close();
+
+    var it = dir.iterate();
+
+    var best_path: ?[]u8 = null;
+    var best_name: ?[]u8 = null;
+    var best_mtime: i128 = 0;
+
+    while (try it.next()) |ent| {
+        if (ent.kind != .directory) continue;
+        if (!std.mem.startsWith(u8, ent.name, "docz-theme-")) continue;
+
+        const css_abs = try std.fs.path.join(alloc, &.{ root, ent.name, "css", "docz.tailwind.css" });
+        const present = blk2: {
+            std.fs.cwd().access(css_abs, .{}) catch break :blk2 false;
+            break :blk2 true;
+        };
+        if (!present) {
+            alloc.free(css_abs);
+            continue;
+        }
+
+        const st = std.fs.cwd().statFile(css_abs) catch {
+            // fall back to lexicographic name if stat fails
+            const better = if (best_name) |bn| std.mem.lessThan(u8, bn, ent.name) else true;
+            if (better) {
+                if (best_path) |bp| alloc.free(bp);
+                if (best_name) |bn| alloc.free(bn);
+                best_path = css_abs;
+                best_name = try alloc.dupe(u8, ent.name);
+            } else {
+                alloc.free(css_abs);
+            }
+            continue;
+        };
+
+        const better = if (best_path == null)
+            true
+        else
+            (st.mtime > best_mtime) or
+                (st.mtime == best_mtime and if (best_name) |bn| std.mem.lessThan(u8, bn, ent.name) else true);
+
+        if (better) {
+            if (best_path) |bp| alloc.free(bp);
+            if (best_name) |bn| alloc.free(bn);
+            best_path = css_abs;
+            best_name = try alloc.dupe(u8, ent.name);
+            best_mtime = st.mtime;
+        } else {
+            alloc.free(css_abs);
+        }
+    }
+
+    if (best_name) |bn| alloc.free(bn);
+    return best_path;
+}
+
+// Discover newest KaTeX under third_party/katex/*/dist and
+// return *hrefs* that the preview server can serve (prefix: /third_party/...).
+pub fn findKatexAssets(alloc: std.mem.Allocator) !?struct {
+    css_href: []u8,
+    js_href: []u8,
+    auto_href: []u8,
+} {
+    const root = "third_party/katex";
+    var dir = std.fs.cwd().openDir(root, .{ .iterate = true }) catch |e| {
+        if (e == error.FileNotFound) return null;
+        return e;
+    };
+    defer dir.close();
+
+    var it = dir.iterate();
+
+    var best_ver: ?[]u8 = null;
+    var best_mtime: i128 = 0;
+
+    while (try it.next()) |ent| {
+        if (ent.kind != .directory) continue;
+        if (ent.name.len == 0 or ent.name[0] == '.') continue;
+
+        const css_disk = try std.fs.path.join(alloc, &.{ root, ent.name, "dist", "katex.min.css" });
+        const present = blk: {
+            std.fs.cwd().access(css_disk, .{}) catch break :blk false;
+            break :blk true;
+        };
+        if (!present) {
+            alloc.free(css_disk);
+            continue;
+        }
+
+        const st = std.fs.cwd().statFile(css_disk) catch {
+            alloc.free(css_disk);
+            // lexicographic fallback
+            const better = if (best_ver) |bv| std.mem.lessThan(u8, bv, ent.name) else true;
+            if (better) {
+                if (best_ver) |bv| alloc.free(bv);
+                best_ver = try alloc.dupe(u8, ent.name);
+            }
+            continue;
+        };
+        alloc.free(css_disk);
+
+        const better_time = (best_ver == null) or (st.mtime > best_mtime) or
+            (st.mtime == best_mtime and if (best_ver) |bv| std.mem.lessThan(u8, bv, ent.name) else true);
+
+        if (better_time) {
+            if (best_ver) |bv| alloc.free(bv);
+            best_ver = try alloc.dupe(u8, ent.name);
+            best_mtime = st.mtime;
+        }
+    }
+
+    if (best_ver == null) return null;
+    defer alloc.free(best_ver.?);
+
+    const css_href = try std.fmt.allocPrint(alloc, "/third_party/katex/{s}/dist/katex.min.css", .{best_ver.?});
+    const js_href = try std.fmt.allocPrint(alloc, "/third_party/katex/{s}/dist/katex.min.js", .{best_ver.?});
+    const auto_href = try std.fmt.allocPrint(alloc, "/third_party/katex/{s}/dist/contrib/auto-render.min.js", .{best_ver.?});
+
+    return .{ .css_href = css_href, .js_href = js_href, .auto_href = auto_href };
+}
+
+// ─────────────────────────────────────────────────────────────
+// Tiny file helpers (used by run.zig)
+// ─────────────────────────────────────────────────────────────
+
+pub fn copyFileStreaming(src_abs: []const u8, dest_abs: []const u8) !void {
+    if (std.fs.path.dirname(dest_abs)) |d| try std.fs.cwd().makePath(d);
+
+    var in_file = try std.fs.cwd().openFile(src_abs, .{});
+    defer in_file.close();
+
+    var out_file = try std.fs.cwd().createFile(dest_abs, .{ .truncate = true });
+    defer out_file.close();
+
+    var buf: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = try in_file.read(&buf);
+        if (n == 0) break;
+        try out_file.writeAll(buf[0..n]);
+    }
+}
+
+pub fn fileMTime(path: []const u8) !i128 {
+    const st = try std.fs.cwd().statFile(path);
+    return st.mtime;
+}
+```
+
+7. `docz/src/cli/convert.zig`:
+
+```
+const std = @import("std");
+const docz = @import("docz");
+
+// internal converters (wired via build.zig)
+const html_import = @import("html_import");
+const html_export = @import("html_export");
+const md_import = @import("md_import");
+const md_export = @import("md_export");
+const latex_import = @import("latex_import");
+const latex_export = @import("latex_export");
+
+pub const Kind = enum { dcz, md, html, tex };
+
+fn detectKindFromPath(p: []const u8) ?Kind {
+    const ext = std.fs.path.extension(p);
+    if (ext.len == 0) return null;
+    if (std.ascii.eqlIgnoreCase(ext, ".dcz")) return .dcz;
+    if (std.ascii.eqlIgnoreCase(ext, ".md")) return .md;
+    if (std.ascii.eqlIgnoreCase(ext, ".html") or std.ascii.eqlIgnoreCase(ext, ".htm")) return .html;
+    if (std.ascii.eqlIgnoreCase(ext, ".tex")) return .tex;
+    return null;
+}
+
+fn readFileAlloc(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
+    var f = try std.fs.cwd().openFile(path, .{});
+    defer f.close();
+    return try f.readToEndAlloc(alloc, 1 << 26);
+}
+
+fn writeFile(path: []const u8, data: []const u8) !void {
+    const cwd = std.fs.cwd();
+    if (std.fs.path.dirname(path)) |dirpart| {
+        try cwd.makePath(dirpart);
+    }
+    var f = try cwd.createFile(path, .{ .truncate = true });
+    defer f.close();
+    try f.writeAll(data);
+}
+
+// Robust: same directory as input; just replace extension.
+fn replaceExt(alloc: std.mem.Allocator, path: []const u8, new_ext_with_dot: []const u8) ![]u8 {
+    const dir = std.fs.path.dirname(path);
+    const stem = std.fs.path.stem(path); // base name without extension
+
+    if (dir) |d| {
+        // docs/spec-file.html -> docs/spec-file.css
+        return try std.fmt.allocPrint(alloc, "{s}{c}{s}{s}", .{ d, std.fs.path.sep, stem, new_ext_with_dot });
+    } else {
+        // spec-file.html -> spec-file.css
+        return try std.fmt.allocPrint(alloc, "{s}{s}", .{ stem, new_ext_with_dot });
+    }
+}
+
+fn insertCssLinkBeforeHeadClose(alloc: std.mem.Allocator, html: []const u8, href: []const u8) ![]u8 {
+    const needle = "</head>";
+    const idx_opt = std.mem.indexOf(u8, html, needle);
+    if (idx_opt == null) {
+        // no </head>? prepend for robustness
+        return try std.fmt.allocPrint(alloc, "<link rel=\"stylesheet\" href=\"{s}\">\n{s}", .{ href, html });
+    }
+    const idx = idx_opt.?;
+    var out = std.ArrayList(u8).init(alloc);
+    errdefer out.deinit();
+
+    try out.appendSlice(html[0..idx]);
+    try out.appendSlice("<link rel=\"stylesheet\" href=\"");
+    try out.appendSlice(href);
+    try out.appendSlice("\">\n");
+    try out.appendSlice(html[idx..]);
+
+    return out.toOwnedSlice();
+}
+
+fn writeIndent(w: anytype, n: usize) !void {
+    var k: usize = 0;
+    while (k < n) : (k += 1) try w.writeByte(' ');
+}
+
+// ── Pretty-printer helpers (only what we use) ────────────────
+fn isWs(b: u8) bool {
+    return b == ' ' or b == '\t' or b == '\r';
+}
+fn lowerAscii(c: u8) u8 {
+    return if (c >= 'A' and c <= 'Z') c + 32 else c;
+}
+fn eqLower(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var i: usize = 0;
+    while (i < a.len) : (i += 1) {
+        if (lowerAscii(a[i]) != lowerAscii(b[i])) return false;
+    }
+    return true;
+}
+fn isVoidTag(name: []const u8) bool {
+    // HTML5 void elements
+    return eqLower(name, "area") or eqLower(name, "base") or eqLower(name, "br") or
+        eqLower(name, "col") or eqLower(name, "embed") or eqLower(name, "hr") or
+        eqLower(name, "img") or eqLower(name, "input") or eqLower(name, "link") or
+        eqLower(name, "meta") or eqLower(name, "param") or eqLower(name, "source") or
+        eqLower(name, "track") or eqLower(name, "wbr");
+}
+
+// ── Pretty printer (single implementation) ───────────────────
+fn prettyHtml(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
+    var out = std.ArrayList(u8).init(alloc);
+    errdefer out.deinit();
+
+    var indent: usize = 0;
+    var i: usize = 0;
+
+    while (i < html.len) {
+        const line_start = i;
+        while (i < html.len and html[i] != '\n') : (i += 1) {}
+        const raw = html[line_start..i];
+        if (i < html.len and html[i] == '\n') i += 1; // consume newline
+
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) {
+            try out.append('\n');
+            continue;
+        }
+
+        // Analyze the line
+        var j: usize = 0;
+        while (j < line.len and isWs(line[j])) : (j += 1) {}
+
+        const starts_with_lt = (j < line.len and line[j] == '<');
+
+        var pre_decr: usize = 0;
+        var post_incr: usize = 0;
+
+        if (starts_with_lt) {
+            const after_lt = j + 1;
+            const is_close = after_lt < line.len and line[after_lt] == '/';
+            const is_decl_or_comment = after_lt < line.len and (line[after_lt] == '!' or line[after_lt] == '?');
+
+            // Parse tag name
+            var name_start: usize = after_lt;
+            if (is_close) name_start += 1; // runtime increment only
+
+            while (name_start < line.len and isWs(line[name_start])) : (name_start += 1) {}
+
+            var name_end = name_start;
+            while (name_end < line.len) : (name_end += 1) {
+                const ch = line[name_end];
+                if (ch == '>' or ch == '/' or isWs(ch) or ch == '\n') break;
+            }
+            const tag_name = if (name_end > name_start) line[name_start..name_end] else line[name_start..name_start];
+
+            // Self-close syntax and void detection
+            const self_closed_syntax = line.len >= 2 and line[line.len - 2] == '/' and line[line.len - 1] == '>';
+            const voidish = isVoidTag(tag_name);
+
+            // Does this same line contain a closing tag too? (e.g., <h1>hi</h1>)
+            const has_inline_close = std.mem.indexOf(u8, line, "</") != null;
+
+            if (is_close and !is_decl_or_comment) {
+                if (indent > 0) pre_decr = 1;
+            } else if (!is_decl_or_comment and !self_closed_syntax and !voidish) {
+                if (!has_inline_close) {
+                    post_incr = 1;
+                }
+            }
+        }
+
+        if (pre_decr > 0 and indent >= pre_decr) indent -= pre_decr;
+
+        // Emit line with current indent
+        try out.appendNTimes(' ', indent * 2);
+        try out.appendSlice(line);
+        try out.append('\n');
+
+        indent += post_incr;
+    }
+
+    return out.toOwnedSlice();
+}
+
+// ─────────────────────────────────────────────────────────────
+// PUBLIC ENTRY (called by main.zig)
+// ─────────────────────────────────────────────────────────────
+pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
+    const usage =
+        "Usage: docz convert <input.{dcz|md|html|htm|tex}> [--to|-t <output.{dcz|md|html|tex}>]\n" ++
+        "       [--css inline|file] [--css-file <path>] [--pretty|--no-pretty]\n";
+
+    const in_path = it.next() orelse {
+        std.debug.print("{s}", .{usage});
+        return error.Invalid;
+    };
+
+    // flags
+    var out_path: ?[]const u8 = null;
+
+    // NOTE: identifier can't be named "inline" in Zig; use inline_css
+    const CssMode = enum { inline_css, file };
+    var css_mode: CssMode = .inline_css;
+    var css_file: ?[]const u8 = null;
+
+    // pretty printing: default ON
+    var pretty: bool = true;
+
+    while (it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--to") or std.mem.eql(u8, arg, "-t")) {
+            out_path = it.next() orelse {
+                std.debug.print("convert: --to requires a value\n", .{});
+                return error.Invalid;
+            };
+        } else if (std.mem.eql(u8, arg, "--css")) {
+            const v = it.next() orelse {
+                std.debug.print("convert: --css requires a value: inline|file\n", .{});
+                return error.Invalid;
+            };
+            if (std.mem.eql(u8, v, "inline")) {
+                css_mode = .inline_css;
+            } else if (std.mem.eql(u8, v, "file")) {
+                css_mode = .file;
+            } else {
+                std.debug.print("convert: --css must be 'inline' or 'file' (got '{s}')\n", .{v});
+                return error.Invalid;
+            }
+        } else if (std.mem.eql(u8, arg, "--css-file")) {
+            css_file = it.next() orelse {
+                std.debug.print("convert: --css-file requires a value\n", .{});
+                return error.Invalid;
+            };
+        } else if (std.mem.eql(u8, arg, "--pretty")) {
+            pretty = true;
+        } else if (std.mem.eql(u8, arg, "--no-pretty")) {
+            pretty = false;
+        } else {
+            std.debug.print("convert: unknown arg: {s}\n", .{arg});
+            return error.Invalid;
+        }
+    }
+
+    const in_kind = detectKindFromPath(in_path) orelse {
+        std.debug.print("convert: unsupported input type: {s}\n", .{in_path});
+        return error.Invalid;
+    };
+
+    const input = readFileAlloc(alloc, in_path) catch |e| {
+        const cwd_buf: ?[]u8 = std.fs.cwd().realpathAlloc(alloc, ".") catch null;
+        defer if (cwd_buf) |buf| alloc.free(buf);
+        const cwd = cwd_buf orelse "<?>";
+
+        std.debug.print("convert: failed to read '{s}' (cwd: {s}): {s}\n", .{ in_path, cwd, @errorName(e) });
+        return e;
+    };
+    defer alloc.free(input);
+
+    var out_buf: []u8 = &[_]u8{};
+    defer if (out_buf.len != 0 and out_buf.ptr != input.ptr) alloc.free(out_buf);
+
+    if (in_kind == .dcz) {
+        // DCZ -> AST
+        const tokens = try docz.Tokenizer.tokenize(input, alloc);
+        defer {
+            docz.Tokenizer.freeTokens(alloc, tokens);
+            alloc.free(tokens);
+        }
+
+        var ast = try docz.Parser.parse(tokens, alloc);
+        defer ast.deinit();
+
+        const out_kind = if (out_path) |p| detectKindFromPath(p) else null;
+
+        if (out_kind == null or out_kind.? == .dcz) {
+            out_buf = try alloc.dupe(u8, input);
+        } else switch (out_kind.?) {
+            .md => out_buf = try md_export.exportAstToMarkdown(&ast, alloc),
+
+            .html => {
+                // 1) start with inline <style> included by the exporter
+                const html_inline = try html_export.exportHtml(&ast, alloc);
+                errdefer alloc.free(html_inline);
+
+                if (css_mode == .file) {
+                    // 2) decide CSS path (+ ownership)
+                    var css_path: []const u8 = undefined;
+                    var css_path_needs_free = false;
+                    if (css_file) |p| {
+                        css_path = p; // user-provided; not owned
+                    } else if (out_path) |to_path| {
+                        css_path = try replaceExt(alloc, to_path, ".css");
+                        css_path_needs_free = true; // owned
+                    } else {
+                        css_path = "docz.css"; // fallback; not owned
+                    }
+                    defer if (css_path_needs_free) alloc.free(css_path);
+
+                    // 3) validate extension if present
+                    const ext = std.fs.path.extension(css_path);
+                    if (ext.len != 0 and !std.ascii.eqlIgnoreCase(ext, ".css")) {
+                        std.debug.print("convert: --css-file should end with .css (got {s})\n", .{css_path});
+                        return error.Invalid;
+                    }
+
+                    // 4) collect CSS from AST and write it
+                    const css_blob = try html_export.collectInlineCss(&ast, alloc);
+                    defer alloc.free(css_blob);
+                    try writeFile(css_path, css_blob);
+
+                    // 5) strip first <style>…</style> from HTML
+                    const html_no_style = try html_export.stripFirstStyleBlock(html_inline, alloc);
+                    alloc.free(html_inline);
+
+                    // 6) inject <link> before </head>
+                    const html_linked = try insertCssLinkBeforeHeadClose(alloc, html_no_style, css_path);
+                    alloc.free(html_no_style);
+
+                    // 7) pretty if requested
+                    if (pretty) {
+                        const pretty_buf = try prettyHtml(alloc, html_linked);
+                        alloc.free(html_linked);
+                        out_buf = pretty_buf;
+                    } else {
+                        out_buf = html_linked;
+                    }
+                } else {
+                    // inline mode (default)
+                    if (pretty) {
+                        const pretty_buf = try prettyHtml(alloc, html_inline);
+                        alloc.free(html_inline);
+                        out_buf = pretty_buf;
+                    } else {
+                        out_buf = html_inline;
+                    }
+                }
+            },
+
+            .tex => out_buf = try latex_export.exportAstToLatex(&ast, alloc),
+            .dcz => unreachable,
+        }
+    } else {
+        // Import -> DCZ
+        switch (in_kind) {
+            .md => out_buf = try md_import.importMarkdownToDcz(alloc, input),
+            .html => out_buf = try html_import.importHtmlToDcz(alloc, input),
+            .tex => out_buf = try latex_import.importLatexToDcz(alloc, input),
+            .dcz => unreachable,
+        }
+    }
+
+    if (out_path) |p| {
+        if (detectKindFromPath(p) == null) {
+            std.debug.print("convert: unsupported output type: {s}\n", .{p});
+            return error.Invalid;
+        }
+        try writeFile(p, out_buf);
+    } else {
+        // Print buffer
+        std.debug.print("{s}", .{out_buf});
+    }
+}
+
+test "convert.detectKindFromPath: basic mapping" {
+    try std.testing.expect(detectKindFromPath("a.dcz") == .dcz);
+    try std.testing.expect(detectKindFromPath("a.MD") == .md);
+    try std.testing.expect(detectKindFromPath("a.html") == .html);
+    try std.testing.expect(detectKindFromPath("a.HTM") == .html);
+    try std.testing.expect(detectKindFromPath("a.tex") == .tex);
+    try std.testing.expect(detectKindFromPath("noext") == null);
+}
+```
+
+8. `docz/src/convert/markdown/export.zig`:
+
+```
+const std = @import("std");
+const docz = @import("docz"); // <— instead of ../../parser/ast.zig
+const ASTNode = docz.AST.ASTNode;
+const NodeType = docz.AST.NodeType;
+
+// -------------------------
+// Helpers
+// -------------------------
+
+fn stripSingleTrailingNewline(buf: *std.ArrayList(u8)) void {
+    if (buf.items.len != 0 and buf.items[buf.items.len - 1] == '\n') {
+        _ = buf.pop();
+    }
+}
+
+fn writeNewline(w: anytype) !void {
+    try w.writeAll("\n");
+}
+
+fn writeBlankLine(w: anytype) !void {
+    try w.writeAll("\n\n");
+}
+
+fn clampHeadingLevel(raw: usize) usize {
+    return if (raw == 0) 1 else if (raw > 6) 6 else raw;
+}
+
+fn repeatChar(w: anytype, c: u8, n: usize) !void {
+    var i: usize = 0;
+    while (i < n) : (i += 1) try w.writeByte(c);
+}
+
+fn writeHeading(w: anytype, level_str: []const u8, text: []const u8) !void {
+    const raw_level = std.fmt.parseUnsigned(usize, level_str, 10) catch 1;
+    const lvl = clampHeadingLevel(raw_level);
+    try repeatChar(w, '#', lvl);
+    try w.writeByte(' ');
+    try w.writeAll(text);
+    try writeBlankLine(w);
+}
+
+fn writeParagraph(w: anytype, text: []const u8) !void {
+    const t = std.mem.trim(u8, text, " \t\r\n");
+    if (t.len == 0) return;
+    try w.writeAll(t);
+    try writeBlankLine(w);
+}
+
+/// Pick a fence for code blocks. If the body contains any backticks,
+/// switch to tildes to avoid the need for escaping.
+fn chooseFence(body: []const u8) []const u8 {
+    return if (std.mem.indexOfScalar(u8, body, '`') != null) "~~~" else "```";
+}
+
+fn writeCodeBlock(w: anytype, lang_opt: ?[]const u8, body: []const u8) !void {
+    const fence = chooseFence(body);
+    try w.writeAll(fence);
+    if (lang_opt) |lang| {
+        if (lang.len > 0) {
+            try w.writeByte(' ');
+            try w.writeAll(lang);
+        }
+    }
+    try writeNewline(w);
+    try w.writeAll(body);
+    try writeNewline(w);
+    try w.writeAll(fence);
+    try writeBlankLine(w);
+}
+
+fn writeMathBlock(w: anytype, body: []const u8) !void {
+    // Block math as $$ ... $$
+    try w.writeAll("$$\n");
+    try w.writeAll(body);
+    try w.writeAll("\n$$");
+    try writeBlankLine(w);
+}
+
+fn writeImage(w: anytype, src: []const u8) !void {
+    const s = std.mem.trim(u8, src, " \t\r\n");
+    if (s.len == 0) return;
+    try w.writeAll("![image](");
+    try w.writeAll(s);
+    try w.writeByte(')');
+    try writeBlankLine(w);
+}
+
+// -------------------------
+// Export API
+// -------------------------
+
+/// Export AST → GitHub-flavored Markdown (minimal).
+/// - Meta(title) becomes a top-level `# Title`
+/// - Headings map to `#`, `##`, ...
+/// - Content becomes paragraphs
+/// - CodeBlock uses fences; language goes after a space: "``` zig\n"
+///   If body contains backticks, fence switches to `~~~`.
+/// - Math is emitted inline as `$...$` on its own paragraph
+/// - Media (src) becomes `![](<src>)`
+pub fn exportAstToMarkdown(doc: *const ASTNode, allocator: std.mem.Allocator) ![]u8 {
+    var out = std.ArrayList(u8).init(allocator);
+    errdefer out.deinit();
+    const w = out.writer();
+
+    var last_was_code = false;
+
+    for (doc.children.items) |node| {
+        switch (node.node_type) {
+            .Meta => {
+                if (node.attributes.get("title")) |title| {
+                    try w.print("# {s}\n", .{title});
+                    const s = out.items;
+                    if (!std.mem.endsWith(u8, s, "\n\n")) {
+                        if (std.mem.endsWith(u8, s, "\n")) try out.append('\n') else try out.appendSlice("\n\n");
+                    }
+                    last_was_code = false;
+                }
+            },
+            .Heading => {
+                const level_str = node.attributes.get("level") orelse "1";
+                var lvl: u8 = 1;
+                if (level_str.len > 0 and level_str[0] >= '1' and level_str[0] <= '6')
+                    lvl = @intCast(level_str[0] - '0');
+                if (lvl < 1) lvl = 1;
+                if (lvl > 6) lvl = 6;
+
+                var i: usize = 0;
+                while (i < lvl) : (i += 1) try w.print("#", .{});
+                try w.print(" {s}\n", .{std.mem.trimRight(u8, node.content, " \t\r\n")});
+
+                const s = out.items;
+                if (!std.mem.endsWith(u8, s, "\n\n")) {
+                    if (std.mem.endsWith(u8, s, "\n")) try out.append('\n') else try out.appendSlice("\n\n");
+                }
+                last_was_code = false;
+            },
+            .Content => {
+                const txt = std.mem.trimRight(u8, node.content, " \t\r\n");
+                if (txt.len != 0) {
+                    try w.print("{s}\n", .{txt});
+                    const s = out.items;
+                    if (!std.mem.endsWith(u8, s, "\n\n")) {
+                        if (std.mem.endsWith(u8, s, "\n")) try out.append('\n') else try out.appendSlice("\n\n");
+                    }
+                    last_was_code = false;
+                }
+            },
+            .CodeBlock => {
+                const lang = node.attributes.get("language") orelse "";
+                const use_tildes = std.mem.indexOf(u8, node.content, "```") != null;
+                const fence = if (use_tildes) "~~~" else "```";
+
+                if (lang.len != 0) {
+                    try w.print("{s} {s}\n{s}\n{s}\n", .{ fence, lang, node.content, fence });
+                } else {
+                    try w.print("{s}\n{s}\n{s}\n", .{ fence, node.content, fence });
+                }
+
+                // Ensure blank line after block
+                const s = out.items;
+                if (!std.mem.endsWith(u8, s, "\n\n")) {
+                    if (std.mem.endsWith(u8, s, "\n")) try out.append('\n') else try out.appendSlice("\n\n");
+                }
+                last_was_code = true;
+            },
+            .Math => {
+                // Keep $$...$$ blocks (tests look for this form)
+                try w.print("$$\n{s}\n$$\n", .{node.content});
+
+                // Ensure blank line after block
+                const s = out.items;
+                if (!std.mem.endsWith(u8, s, "\n\n")) {
+                    if (std.mem.endsWith(u8, s, "\n")) try out.append('\n') else try out.appendSlice("\n\n");
+                }
+                last_was_code = false;
+            },
+            .Media => {
+                const src = node.attributes.get("src") orelse "";
+                if (src.len != 0) {
+                    const alt = node.attributes.get("alt") orelse "image";
+                    try w.print("![{s}]({s})\n", .{ alt, src });
+
+                    const s = out.items;
+                    if (!std.mem.endsWith(u8, s, "\n\n")) {
+                        if (std.mem.endsWith(u8, s, "\n")) try out.append('\n') else try out.appendSlice("\n\n");
+                    }
+                    last_was_code = false;
+                }
+            },
+            .Import, .Style => {},
+            else => {},
+        }
+    }
+
+    // EOF normalization
+    if (out.items.len > 0) {
+        if (std.mem.endsWith(u8, out.items, "\n\n")) {
+            if (!last_was_code) {
+                _ = out.pop(); // collapse to single newline if last block wasn’t code
+            }
+        } else if (!std.mem.endsWith(u8, out.items, "\n")) {
+            try out.append('\n');
+        }
+    }
+
+    return out.toOwnedSlice();
+}
+
+// -------------------------
+// Unit tests
+// -------------------------
+
+test "markdown export: title meta + headings + paragraph" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    var root = ASTNode.init(A, NodeType.Document);
+    defer root.deinit();
+
+    // Meta title
+    {
+        var meta = ASTNode.init(A, NodeType.Meta);
+        try meta.attributes.put("title", "My Doc");
+        try root.children.append(meta);
+    }
+    // H2
+    {
+        var h = ASTNode.init(A, NodeType.Heading);
+        try h.attributes.put("level", "2");
+        h.content = "Section";
+        try root.children.append(h);
+    }
+    // Paragraph
+    {
+        var p = ASTNode.init(A, NodeType.Content);
+        p.content = "Hello **world**!";
+        try root.children.append(p);
+    }
+
+    const md = try exportAstToMarkdown(&root, A);
+    defer A.free(md);
+
+    const expected =
+        \\# My Doc
+        \\
+        \\## Section
+        \\
+        \\Hello **world**!
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, md);
+}
+
+test "markdown export: code, math, image, and spacing" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    var root = ASTNode.init(A, NodeType.Document);
+    defer root.deinit();
+
+    // Code block with language
+    {
+        var code = ASTNode.init(A, NodeType.CodeBlock);
+        try code.attributes.put("language", "zig");
+        code.content =
+            \\const x: u8 = 42;
+        ;
+        try root.children.append(code);
+    }
+
+    // Math block
+    {
+        var math = ASTNode.init(A, NodeType.Math);
+        math.content = "E = mc^2";
+        try root.children.append(math);
+    }
+
+    // Image
+    {
+        var img = ASTNode.init(A, NodeType.Media);
+        try img.attributes.put("src", "/img/logo.png");
+        try root.children.append(img);
+    }
+
+    const md = try exportAstToMarkdown(&root, A);
+    defer A.free(md);
+
+    const snippet_code =
+        \\``` zig
+        \\const x: u8 = 42;
+        \\```
+    ;
+    try std.testing.expect(std.mem.indexOf(u8, md, snippet_code) != null);
+    try std.testing.expect(std.mem.indexOf(u8, md, "$$\nE = mc^2\n$$") != null);
+    try std.testing.expect(std.mem.indexOf(u8, md, "![image](/img/logo.png)") != null);
+}
+
+test "markdown export: fence selection switches to tildes when body contains backticks" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    var root = ASTNode.init(A, NodeType.Document);
+    defer root.deinit();
+
+    var code = ASTNode.init(A, NodeType.CodeBlock);
+    try code.attributes.put("language", "txt");
+    code.content =
+        \\here are three backticks: ```
+        \\and more text
+    ;
+    try root.children.append(code);
+
+    const md = try exportAstToMarkdown(&root, A);
+    defer A.free(md);
+
+    // Should use ~~~ fences
+    try std.testing.expect(std.mem.indexOf(u8, md, "~~~ txt\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, md, "\n~~~\n\n") != null);
+}
+```
+
+9. `docz/src/renderer/html.zig`:
+
+```
+const std = @import("std");
+const ASTNode = @import("../parser/ast.zig").ASTNode;
+const NodeType = @import("../parser/ast.zig").NodeType;
+
+// -----------------------------------------------------------------------------
+// Asset options + VENDOR.lock reader
+// -----------------------------------------------------------------------------
+
+pub const RenderAssets = struct {
+    enable_katex: bool = true,
+    enable_tailwind: bool = true,
+    third_party_root: []const u8 = "third_party",
+};
+
+fn readFileAlloc(alloc: std.mem.Allocator, path: []const u8, max: usize) ![]u8 {
+    var f = try std.fs.cwd().openFile(path, .{});
+    defer f.close();
+    return try f.readToEndAlloc(alloc, max);
+}
+
+/// Very small JSON helper: find string value for a top-level key, assuming
+/// a simple object like: {"katex":"0.16.11","tailwind":"docz-theme-1.0.0"}
+/// This intentionally avoids std.json for stability across Zig versions.
+fn findJsonStringValue(buf: []const u8, key: []const u8) ?[]const u8 {
+    // Look for "key"
+    var pat_buf: [128]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&pat_buf);
+    const A = fba.allocator();
+    const quoted_key = std.fmt.allocPrint(A, "\"{s}\"", .{key}) catch return null;
+
+    const key_i = std.mem.indexOf(u8, buf, quoted_key) orelse return null;
+
+    // Find colon after key
+    var i: usize = key_i + quoted_key.len;
+    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+    if (i >= buf.len or buf[i] != ':') return null;
+    i += 1;
+
+    // Find opening quote of the value
+    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+    if (i >= buf.len or buf[i] != '"') return null;
+    i += 1; // start of value
+
+    const start = i;
+    // Find closing quote (no escape handling needed for plain versions/labels)
+    while (i < buf.len and buf[i] != '"') : (i += 1) {}
+    if (i >= buf.len) return null;
+
+    return buf[start..i];
+}
+
+fn readVendorLock(alloc: std.mem.Allocator, third_party_root: []const u8) !struct {
+    katex: ?[]const u8,
+    tailwind: ?[]const u8,
+} {
+    const lock_path = try std.fs.path.join(alloc, &.{ third_party_root, "VENDOR.lock" });
+    defer alloc.free(lock_path);
+
+    const buf = readFileAlloc(alloc, lock_path, 1 << 16) catch |e| {
+        if (e == error.FileNotFound) return .{ .katex = null, .tailwind = null };
+        return e;
+    };
+    defer alloc.free(buf);
+
+    const k = findJsonStringValue(buf, "katex");
+    const t = findJsonStringValue(buf, "tailwind");
+
+    return .{
+        .katex = if (k) |s| try alloc.dupe(u8, s) else null,
+        .tailwind = if (t) |s| try alloc.dupe(u8, s) else null,
+    };
+}
+
+/// Emit <link>/<script> tags for vendored assets based on VENDOR.lock.
+pub fn emitHeadAssets(alloc: std.mem.Allocator, w: anytype, opts: RenderAssets) !void {
+    const lock = try readVendorLock(alloc, opts.third_party_root);
+    defer if (lock.katex) |s| alloc.free(s);
+    defer if (lock.tailwind) |s| alloc.free(s);
+
+    if (opts.enable_tailwind) {
+        if (lock.tailwind) |ver| {
+            try w.print(
+                "<link rel=\"stylesheet\" href=\"/third_party/tailwind/docz-theme-{s}/css/docz.tailwind.css\"/>\n",
+                .{ver},
+            );
+        }
+    }
+    if (opts.enable_katex) {
+        if (lock.katex) |ver| {
+            try w.print(
+                \\<link rel="stylesheet" href="/third_party/katex/{s}/dist/katex.min.css"/>
+                \\<script defer src="/third_party/katex/{s}/dist/katex.min.js"></script>
+                \\
+            , .{ ver, ver });
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Existing helpers (kept)
+// -----------------------------------------------------------------------------
+
+fn lessStr(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+fn styleKeyPriority(k: []const u8) u8 {
+    if (std.mem.eql(u8, k, "font-size")) return 0; // ensure font-size first
+    if (std.mem.eql(u8, k, "color")) return 1; // then color
+    return 100; // others later
+}
+
+fn styleKeyLess(_: void, a: []const u8, b: []const u8) bool {
+    const pa = styleKeyPriority(a);
+    const pb = styleKeyPriority(b);
+    if (pa != pb) return pa < pb; // priority first
+    return std.mem.lessThan(u8, a, b); // then lexicographic
+}
+
+/// Converts attributes → inline CSS string; excludes non-style keys (like "mode")
+fn buildInlineStyle(attributes: std.StringHashMap([]const u8), allocator: std.mem.Allocator) ![]u8 {
+    var keys = std.ArrayList([]const u8).init(allocator);
+    defer keys.deinit();
+
+    var it = attributes.iterator();
+    while (it.next()) |entry| {
+        const k = entry.key_ptr.*;
+        if (std.mem.eql(u8, k, "mode")) continue; // exclude control key
+        try keys.append(k);
+    }
+
+    // sort with priority
+    std.mem.sort([]const u8, keys.items, {}, styleKeyLess);
+
+    var out = std.ArrayList(u8).init(allocator);
+    const w = out.writer();
+
+    var first = true;
+    for (keys.items) |k| {
+        const v = attributes.get(k).?;
+        if (!first) try w.print(";", .{});
+        try w.print("{s}:{s}", .{ k, v });
+        first = false;
+    }
+    try w.print(";", .{}); // trailing ; expected by the test
+
+    return out.toOwnedSlice();
+}
+
+/// Converts style-def content into CSS
+fn buildGlobalCSS(styleContent: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    var builder = std.ArrayList(u8).init(allocator);
+    const writer = builder.writer();
+
+    var lines = std.mem.tokenizeScalar(u8, styleContent, '\n');
+    while (lines.next()) |line| {
+        var trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+
+        const colonIndex = std.mem.indexOfScalar(u8, trimmed, ':') orelse continue;
+        const className = std.mem.trim(u8, trimmed[0..colonIndex], " \t");
+        const propsRaw = std.mem.trim(u8, trimmed[colonIndex + 1 ..], " \t");
+
+        try writer.print(".{s} {{ ", .{className});
+
+        var propsIter = std.mem.tokenizeScalar(u8, propsRaw, ',');
+        var first = true;
+        while (propsIter.next()) |prop| {
+            var cleanProp = std.mem.trim(u8, prop, " \t");
+            const eqIndex = std.mem.indexOfScalar(u8, cleanProp, '=') orelse continue;
+            const key = std.mem.trim(u8, cleanProp[0..eqIndex], " \t");
+            const value = std.mem.trim(u8, cleanProp[eqIndex + 1 ..], " \t\"");
+
+            if (!first) try writer.print(" ", .{});
+            try writer.print("{s}:{s};", .{ key, value });
+            first = false;
+        }
+
+        try writer.print(" }}\n", .{});
+    }
+
+    return builder.toOwnedSlice();
+}
+
+// -----------------------------------------------------------------------------
+// Renderer
+// -----------------------------------------------------------------------------
+
+pub fn renderHTML(root: *const ASTNode, allocator: std.mem.Allocator) ![]u8 {
+    var list = std.ArrayList(u8).init(allocator);
+    const writer = list.writer();
+
+    try writer.print("<!DOCTYPE html>\n<html>\n<head>\n", .{});
+
+    // Meta information
+    for (root.children.items) |node| {
+        if (node.node_type == .Meta) {
+            var it = node.attributes.iterator();
+            while (it.next()) |entry| {
+                if (std.mem.eql(u8, entry.key_ptr.*, "title")) {
+                    try writer.print("<title>{s}</title>\n", .{entry.value_ptr.*});
+                } else {
+                    try writer.print("<meta name=\"{s}\" content=\"{s}\">\n", .{
+                        entry.key_ptr.*, entry.value_ptr.*,
+                    });
+                }
+            }
+        }
+    }
+
+    // Global CSS (from Style nodes in "global" mode)
+    var globalCSSBuilder = std.ArrayList(u8).init(allocator);
+    const globalWriter = globalCSSBuilder.writer();
+
+    for (root.children.items) |node| {
+        if (node.node_type == .Style) {
+            if (node.attributes.get("mode")) |mode| {
+                if (std.mem.eql(u8, mode, "global")) {
+                    const css = try buildGlobalCSS(node.content, allocator);
+                    defer allocator.free(css);
+                    try globalWriter.print("{s}\n", .{css});
+                }
+            }
+        }
+    }
+
+    if (globalCSSBuilder.items.len > 0) {
+        try writer.print("<style>\n{s}</style>\n", .{globalCSSBuilder.items});
+    }
+    globalCSSBuilder.deinit();
+
+    // Vendored assets (Tailwind / KaTeX), read from VENDOR.lock if present.
+    // Defaults: enabled. Can be overridden later via CLI/config to disable.
+    try emitHeadAssets(allocator, writer, .{});
+
+    try writer.print("</head>\n<body>\n", .{});
+
+    // Body rendering
+    for (root.children.items) |node| {
+        switch (node.node_type) {
+            .Meta => {
+                // Meta already emitted into <head>; skip in body to avoid noise.
+            },
+            .Heading => {
+                const level = node.attributes.get("level") orelse "1";
+                const text = std.mem.trimRight(u8, node.content, " \t\r\n");
+                try writer.print("<h{s}>{s}</h{s}>\n", .{ level, text, level });
+            },
+            .Content => {
+                try writer.print("<p>{s}</p>\n", .{node.content});
+            },
+            .CodeBlock => {
+                try writer.print("<pre><code>{s}</code></pre>\n", .{node.content});
+            },
+            .Math => {
+                try writer.print("<div class=\"math\">{s}</div>\n", .{node.content});
+            },
+            .Media => {
+                const src = node.attributes.get("src") orelse "";
+                try writer.print("<img src=\"{s}\" />\n", .{src});
+            },
+            .Import => {
+                const path = node.attributes.get("href") orelse "";
+                try writer.print("<link rel=\"stylesheet\" href=\"{s}\">\n", .{path});
+            },
+            .Style => {
+                if (node.attributes.get("mode")) |mode| {
+                    if (std.mem.eql(u8, mode, "inline")) {
+                        const inlineCSS = try buildInlineStyle(node.attributes, allocator);
+                        defer allocator.free(inlineCSS);
+                        try writer.print("<span style=\"{s}\">{s}</span>\n", .{ inlineCSS, node.content });
+                    }
+                }
+            },
+            else => {
+                try writer.print("<!-- Unhandled node: {s} -->\n", .{@tagName(node.node_type)});
+            },
+        }
+    }
+
+    try writer.print("</body>\n</html>\n", .{});
+    return list.toOwnedSlice();
+}
+
+// ----------------------
+// ✅ Tests (unchanged)
+// ----------------------
+
+test "Render HTML with inline style" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    var root = ASTNode.init(allocator, NodeType.Document);
+    defer root.deinit();
+
+    var styleNode = ASTNode.init(allocator, NodeType.Style);
+    try styleNode.attributes.put("mode", "inline");
+    try styleNode.attributes.put("font-size", "18px");
+    try styleNode.attributes.put("color", "blue");
+    styleNode.content = "Styled Text";
+    try root.children.append(styleNode);
+
+    const html = try renderHTML(&root, allocator);
+    defer allocator.free(html);
+
+    try std.testing.expect(std.mem.indexOf(u8, html, "style=\"font-size:18px;color:blue;\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "Styled Text") != null);
+}
+
+test "Render HTML with global style-def" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    var root = ASTNode.init(allocator, NodeType.Document);
+    defer root.deinit();
+
+    var globalStyleNode = ASTNode.init(allocator, NodeType.Style);
+    try globalStyleNode.attributes.put("mode", "global");
+    globalStyleNode.content =
+        \\heading-level-1: font-size=36px, font-weight=bold
+        \\body-text: font-family="Inter", line-height=1.6
+    ;
+    try root.children.append(globalStyleNode);
+
+    const html = try renderHTML(&root, allocator);
+    defer allocator.free(html);
+
+    try std.testing.expect(std.mem.indexOf(u8, html, ".heading-level-1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, ".body-text") != null);
+}
+```
+
+11. `docz/tests/integration/parser.zig`:
+
+```
+const std = @import("std");
+const docz = @import("docz");
+
+test "integration: parser builds AST from token list" {
+    const input =
+        \\@heading(level=2) Heading @end
+        \\Some paragraph text with *emphasis*.
+    ;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    const tokens = try docz.Tokenizer.tokenize(input, allocator);
+    defer {
+        docz.Tokenizer.freeTokens(allocator, tokens);
+        allocator.free(tokens);
+    }
+
+    var ast = try docz.Parser.parse(tokens, allocator);
+    defer ast.deinit();
+
+    // std.debug.print("🌲 AST has {d} top-level nodes\n", .{ast.children.items.len});
+    try std.testing.expect(ast.children.items.len >= 1);
+}
+```
+
+12. `docz/tests/integration/renderer.zig`:
+
+```
+const std = @import("std");
+const docz = @import("docz");
+
+pub const _force_test_discovery = true;
+
+test "integration: renderer produces HTML from simple AST" {
+    const input =
+        \\@heading(level=3) Render Test @end
+        \\Code below:
+        \\@code(language="zig")
+        \\const x = 9;
+        \\@end
+    ;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+
+    // Tokenize
+    const tokens = try docz.Tokenizer.tokenize(input, allocator);
+    // IMPORTANT: since we'll parse, the AST owns any lexeme strings.
+    // Only free the *slice* here (no Tokenizer.freeTokens).
+    defer allocator.free(tokens);
+
+    // Parse → AST takes ownership of token lexemes
+    var ast = try docz.Parser.parse(tokens, allocator);
+    defer ast.deinit();
+
+    // Render
+    const html = try docz.Renderer.renderHTML(&ast, allocator);
+    defer allocator.free(html);
+
+    // std.debug.print("🖨️  Rendered HTML:\n{s}\n", .{html});
+
+    // Assertions
+    try std.testing.expect(std.mem.containsAtLeast(u8, html, 1, "<h3>Render Test</h3>"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, html, 1, "const x = 9;"));
+}
+```
+
+13. `docz/tests/e2e/file_to_html.zig`:
+
+```
+const std = @import("std");
+const docz = @import("docz");
+const tokenizer = docz.parser.tokenizer;
+const parser = docz.parser.parser;
+const renderer = docz.renderer.html;
+
+test "📄 Parse and render a basic .dcz file to HTML" {
+    const input =
+        \\@meta(title="Hello")
+        \\@heading(level=1) Welcome to Docz @end
+        \\@code(language="zig")
+        \\const x = 42;
+        \\@end
+    ;
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    defer std.debug.assert(gpa.deinit() == .ok);
+
+    const tokens = try tokenizer.tokenize(input, allocator);
+    defer {
+        docz.Tokenizer.freeTokens(allocator, tokens);
+        allocator.free(tokens);
+    }
+
+    var ast = try parser.parse(tokens, allocator);
+    defer ast.deinit();
+
+    const html = try renderer.renderHTML(&ast, allocator);
+    defer allocator.free(html);
+
+    // std.debug.print("\n🖨️ Rendered HTML Output:\n{s}\n", .{html});
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, html, 1, "<h1>Welcome to Docz</h1>"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, html, 1, "const x = 42;"));
+}
+```
+
+14. `docz/tests/e2e/convert_cli.zig`:
+
+```
+const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Small path helpers (owned results)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn pathJoin2(alloc: std.mem.Allocator, a: []const u8, b: []const u8) ![]u8 {
+    var list = std.ArrayList([]const u8).init(alloc);
+    defer list.deinit();
+    try list.append(a);
+    try list.append(b);
+    return std.fs.path.join(alloc, list.items);
+}
+
+fn pathJoin3(alloc: std.mem.Allocator, a: []const u8, b: []const u8, c: []const u8) ![]u8 {
+    var list = std.ArrayList([]const u8).init(alloc);
+    defer list.deinit();
+    try list.append(a);
+    try list.append(b);
+    try list.append(c);
+    return std.fs.path.join(alloc, list.items);
+}
+
+fn dirExistsAbs(abs_path: []const u8) bool {
+    var d = std.fs.openDirAbsolute(abs_path, .{}) catch return false;
+    d.close();
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Repo/CWD anchor (stable for test runner)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn repoRootFromCwd(alloc: std.mem.Allocator) ![]u8 {
+    return std.fs.cwd().realpathAlloc(alloc, ".");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Launcher discovery (no nested functions)
+// Strategy:
+//   1) Prefer build_options.e2e_abspath (absolute, set by build.zig)
+//   2) Find-up from CWD for zig-out/bin/docz-e2e(.exe)
+//   3) Find-up from CWD for zig-out/bin/docz(.exe)
+//   4) Fallback to build_options.docz_abspath (absolute)
+// Emits strong diagnostics on failure.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn tryOpenAbs(p: []const u8) bool {
+    if (!std.fs.path.isAbsolute(p)) return false;
+    const f = std.fs.openFileAbsolute(p, .{}) catch return false;
+    f.close();
+    return true;
+}
+
+fn findUpFile(
+    alloc: std.mem.Allocator,
+    start_abs: []const u8,
+    rel: []const u8,
+    max_up: usize,
+) !?[]u8 {
+    if (!std.fs.path.isAbsolute(start_abs)) return null;
+
+    var cur = try alloc.dupe(u8, start_abs);
+    defer alloc.free(cur);
+
+    var i: usize = 0;
+    while (true) : (i += 1) {
+        if (i > max_up) break;
+
+        const cand = try std.fs.path.join(alloc, &[_][]const u8{ cur, rel });
+        if (std.fs.openFileAbsolute(cand, .{})) |f| {
+            f.close();
+            return cand; // owned
+        } else |e| {
+            switch (e) {
+                error.FileNotFound => {},
+                else => {},
+            }
+        }
+        alloc.free(cand);
+
+        const parent_opt = std.fs.path.dirname(cur);
+        if (parent_opt == null) break;
+
+        const parent = parent_opt.?;
+        const dup = try alloc.dupe(u8, parent);
+        alloc.free(cur);
+        cur = dup;
+    }
+    return null;
+}
+
+fn ensureE2ELauncher(alloc: std.mem.Allocator) ![]u8 {
+    const e2e_name = if (builtin.os.tag == .windows) "docz-e2e.exe" else "docz-e2e";
+    const docz_name = if (builtin.os.tag == .windows) "docz.exe" else "docz";
+
+    // 1) baked e2e absolute (most reliable)
+    if (@hasDecl(build_options, "e2e_abspath")) {
+        const baked = build_options.e2e_abspath;
+        if (tryOpenAbs(baked)) return try alloc.dupe(u8, baked);
+    }
+
+    // 2) find-up: zig-out/bin/docz-e2e*
+    const cwd_abs = try std.fs.cwd().realpathAlloc(alloc, ".");
+    defer alloc.free(cwd_abs);
+
+    const rel_e2e = try std.fs.path.join(alloc, &[_][]const u8{ "zig-out", "bin", e2e_name });
+    defer alloc.free(rel_e2e);
+    if (try findUpFile(alloc, cwd_abs, rel_e2e, 8)) |hit| return hit;
+
+    // 3) find-up: zig-out/bin/docz*  (use docz directly if e2e isn’t present)
+    const rel_docz = try std.fs.path.join(alloc, &[_][]const u8{ "zig-out", "bin", docz_name });
+    defer alloc.free(rel_docz);
+    if (try findUpFile(alloc, cwd_abs, rel_docz, 8)) |hit| return hit;
+
+    // 4) baked docz absolute
+    if (@hasDecl(build_options, "docz_abspath")) {
+        const baked_docz = build_options.docz_abspath;
+        if (tryOpenAbs(baked_docz)) return try alloc.dupe(u8, baked_docz);
+    }
+
+    // diagnostics
+    std.debug.print(
+        "[ensureE2ELauncher] Could not find a runnable CLI.\n" ++
+            "  Tried (in order):\n" ++
+            "    • build_options.e2e_abspath\n" ++
+            "    • find-up from CWD for \"zig-out/bin/{s}\"\n" ++
+            "    • find-up from CWD for \"zig-out/bin/{s}\"\n" ++
+            "    • build_options.docz_abspath\n" ++
+            "  CWD: {s}\n",
+        .{ e2e_name, docz_name, cwd_abs },
+    );
+
+    return error.FileNotFound;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test workspace helper (under <repo>/zig-out)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn makeWorkDir(alloc: std.mem.Allocator) !struct { dir: std.fs.Dir, abs: []u8 } {
+    const repo_abs = try repoRootFromCwd(alloc);
+    defer alloc.free(repo_abs);
+
+    const base_abs = if (dirExistsAbs(repo_abs))
+        try alloc.dupe(u8, repo_abs)
+    else
+        try std.fs.cwd().realpathAlloc(alloc, ".");
+    defer alloc.free(base_abs);
+
+    var base_dir = try std.fs.openDirAbsolute(base_abs, .{});
+    defer base_dir.close();
+
+    try base_dir.makePath("zig-out");
+
+    var name_buf: [64]u8 = undefined;
+    const sub = try std.fmt.bufPrint(&name_buf, "e2e_cli_test-{d}", .{std.time.milliTimestamp()});
+    const sub_rel = try std.fs.path.join(alloc, &[_][]const u8{ "zig-out", sub });
+    defer alloc.free(sub_rel);
+
+    try base_dir.makePath(sub_rel);
+
+    const abs = try pathJoin3(alloc, base_abs, "zig-out", sub);
+    const dir = try std.fs.openDirAbsolute(abs, .{ .iterate = false });
+
+    return .{ .dir = dir, .abs = abs };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The actual e2e test
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "e2e: docz convert dcz→tex and tex→dcz" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    const dcz_input =
+        \\@meta(title="T") @end
+        \\@heading(level=1) Hello @end
+        \\Para
+        \\
+    ;
+
+    var work_bundle = try makeWorkDir(A);
+    defer {
+        work_bundle.dir.close();
+        A.free(work_bundle.abs);
+    }
+    const work = work_bundle.dir;
+    const work_abs = work_bundle.abs;
+
+    const in_path = try pathJoin2(A, work_abs, "in.dcz");
+    defer A.free(in_path);
+    const out_path = try pathJoin2(A, work_abs, "out.tex");
+    defer A.free(out_path);
+    const back_path = try pathJoin2(A, work_abs, "back.dcz");
+    defer A.free(back_path);
+
+    {
+        var f = try work.createFile("in.dcz", .{ .truncate = true });
+        defer f.close();
+        _ = try f.writeAll(dcz_input);
+    }
+
+    const exe_path = try ensureE2ELauncher(A);
+    defer A.free(exe_path);
+
+    {
+        var child = std.process.Child.init(
+            &[_][]const u8{ exe_path, "convert", in_path, "--to", out_path },
+            A,
+        );
+        try child.spawn();
+        const term = try child.wait();
+        try std.testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, term);
+    }
+
+    const tex = blk: {
+        var f = try work.openFile("out.tex", .{});
+        defer f.close();
+        break :blk try f.readToEndAlloc(A, 1 << 20);
+    };
+    defer A.free(tex);
+
+    try std.testing.expect(std.mem.indexOf(u8, tex, "\\title{T}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tex, "\\section{Hello}") != null);
+
+    {
+        var child = std.process.Child.init(
+            &[_][]const u8{ exe_path, "convert", out_path, "--to", back_path },
+            A,
+        );
+        try child.spawn();
+        const term = try child.wait();
+        try std.testing.expectEqual(std.process.Child.Term{ .Exited = 0 }, term);
+    }
+
+    const back = blk2: {
+        var f = try work.openFile("back.dcz", .{});
+        defer f.close();
+        break :blk2 try f.readToEndAlloc(A, 1 << 20);
+    };
+    defer A.free(back);
+
+    try std.testing.expect(std.mem.indexOf(u8, back, "@heading(level=1) Hello @end") != null);
+}
+```
