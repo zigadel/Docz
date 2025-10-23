@@ -62,7 +62,6 @@ const Request = struct {
 
         const A = self.allocator;
 
-        // Use separate consts so each defer captures the correct slice.
         const status_line = try std.fmt.allocPrint(A, "HTTP/1.1 {d} {s}\r\n", .{ code, reason });
         defer A.free(status_line);
         try streamWriteAllCompat(self.stream, status_line);
@@ -71,14 +70,12 @@ const Request = struct {
         defer A.free(cl_line);
         try streamWriteAllCompat(self.stream, cl_line);
 
-        // Extra headers
         for (opts.extra_headers) |h| {
             const hline = try std.fmt.allocPrint(A, "{s}: {s}\r\n", .{ h.name, h.value });
             defer A.free(hline);
             try streamWriteAllCompat(self.stream, hline);
         }
 
-        // End of headers + body
         try streamWriteAllCompat(self.stream, "Connection: close\r\n\r\n");
         try streamWriteAllCompat(self.stream, body);
     }
@@ -115,7 +112,7 @@ fn readStreamCompat(stream: *std.net.Stream, buf: []u8) !usize {
             0,
         );
         if (ret == ws2.SOCKET_ERROR) {
-            const werr = ws2.WSAGetLastError(); // enum(u16)
+            const werr = ws2.WSAGetLastError();
             const code: u16 = @intFromEnum(werr);
             return switch (code) {
                 10035 => error.WouldBlock, // WSAEWOULDBLOCK
@@ -138,7 +135,7 @@ fn receiveRequest(alloc: std.mem.Allocator, stream: *std.net.Stream) !Request {
 
     const max_header_bytes: usize = 64 * 1024;
     const start_ms = std.time.milliTimestamp();
-    const retry_budget_ms: i64 = 1800; // tolerate transient socket flakes for ~1.8s
+    const retry_budget_ms: i64 = 1800;
 
     var have_first_line = false;
 
@@ -146,8 +143,6 @@ fn receiveRequest(alloc: std.mem.Allocator, stream: *std.net.Stream) !Request {
         var tmp: [2048]u8 = undefined;
 
         const n = readStreamCompat(stream, tmp[0..]) catch |e| switch (e) {
-            // These all indicate “no data yet / transient”, so back off briefly
-            // and keep trying while we still have budget.
             error.WouldBlock,
             error.Interrupted,
             error.ConnectionResetByPeer,
@@ -157,7 +152,6 @@ fn receiveRequest(alloc: std.mem.Allocator, stream: *std.net.Stream) !Request {
                     std.Thread.sleep(150 * std.time.ns_per_ms);
                     continue;
                 }
-                // Out of patience: treat as bad/empty request.
                 return error.BadRequest;
             },
         };
@@ -166,7 +160,6 @@ fn receiveRequest(alloc: std.mem.Allocator, stream: *std.net.Stream) !Request {
 
         try hdr.appendSlice(alloc, tmp[0..n]);
 
-        // We only need the first line to route.
         if (std.mem.indexOfScalar(u8, hdr.items, '\n') != null) {
             have_first_line = true;
         }
@@ -174,7 +167,6 @@ fn receiveRequest(alloc: std.mem.Allocator, stream: *std.net.Stream) !Request {
 
     if (hdr.items.len == 0) return error.BadRequest;
 
-    // Slice first line; tolerate CRLF/LF
     const nl_i_opt = std.mem.indexOfScalar(u8, hdr.items, '\n');
     const line_end = nl_i_opt orelse hdr.items.len;
     const line_raw = hdr.items[0..line_end];
@@ -208,6 +200,8 @@ pub const PreviewServer = struct {
     allocator: std.mem.Allocator,
     doc_root: []const u8,
     broadcaster: hot.Broadcaster,
+    // TEST-ONLY stop flag to exit the accept loop gracefully
+    stop_requested: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, doc_root: []const u8) !PreviewServer {
         const trimmed = try trimTrailingSlash(allocator, doc_root);
@@ -236,7 +230,6 @@ pub const PreviewServer = struct {
 
         while (true) {
             const net_conn = tcp.accept() catch |e| switch (e) {
-                // Transient accept errors: keep serving
                 error.ConnectionAborted, error.ConnectionResetByPeer => continue,
                 else => return e,
             };
@@ -248,7 +241,6 @@ pub const PreviewServer = struct {
                 }
                 continue;
             };
-
             defer {
                 self.allocator.free(req.method);
                 self.allocator.free(req.target);
@@ -272,6 +264,9 @@ pub const PreviewServer = struct {
                     .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain; charset=utf-8" }},
                 }) catch {};
             };
+
+            // NEW: break out when tests ask us to stop.
+            if (self.stop_requested) break;
         }
     }
 
@@ -295,6 +290,15 @@ pub const PreviewServer = struct {
             return req.respond("", .{
                 .status = .no_content,
                 .extra_headers = &.{.{ .name = "Cache-Control", .value = "no-store" }},
+            });
+        }
+
+        // NEW: test-only shutdown endpoint—flip flag so accept loop exits.
+        if (std.mem.eql(u8, stripQuery(path), "/__docz_stop")) {
+            self.stop_requested = true;
+            return req.respond("stopping\n", .{
+                .status = .ok,
+                .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain; charset=utf-8" }},
             });
         }
 

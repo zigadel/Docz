@@ -4,8 +4,6 @@ const server_mod = @import("web_preview");
 // --- Tunables ---------------------------------------------------------------
 const BOOT_WAIT_SLICE_MS: u64 = 25; // small retry step while server boots
 const BOOT_BUDGET_MS: u64 = 6000; // give the server up to 6s to bind
-const READ_WAIT_SLICE_MS: u64 = 25; // socket read backoff
-const READ_BUDGET_MS: u64 = 4000; // how long we’re willing to wait for bytes
 // ---------------------------------------------------------------------------
 
 fn fileExists(path: []const u8) bool {
@@ -66,9 +64,9 @@ fn readFilePrefixAlloc(a: std.mem.Allocator, path: []const u8, max_bytes: usize)
 /// Find one “real” third_party asset path that the preview server should serve.
 /// Returns an allocator-owned string that the caller must free.
 fn findAnyThirdPartyAsset(a: std.mem.Allocator) !?[]const u8 {
-    // Check lock file first for katex/tailwind versions
-    if (fileExists("third_party.lock")) {
-        const buf = try readFilePrefixAlloc(a, "third_party.lock", 64 * 1024);
+    // Prefer the lock file produced by vendor tooling.
+    if (fileExists("third_party/VENDOR.lock")) {
+        const buf = try readFilePrefixAlloc(a, "third_party/VENDOR.lock", 64 * 1024);
         defer a.free(buf);
 
         if (findJsonStringValue(buf, "katex")) |ver| {
@@ -89,7 +87,7 @@ fn findAnyThirdPartyAsset(a: std.mem.Allocator) !?[]const u8 {
 
     // Fallback: scan directories directly (take the first match we can stat)
     if (std.fs.cwd().openDir("third_party/katex", .{ .iterate = true })) |dir_val| {
-        var d = dir_val; // make it mutable so .close takes *Dir (not *const Dir)
+        var d = dir_val;
         defer d.close();
 
         var it = d.iterate();
@@ -175,10 +173,12 @@ test "preview serves third_party assets" {
 
     // Start the preview server
     var srv = try server_mod.PreviewServer.init(A, ".");
-    defer srv.deinit();
+    defer srv.deinit(); // ensure resources are released even if test fails
 
     const port: u16 = 5179;
-    _ = try std.Thread.spawn(.{}, server_mod.PreviewServer.listenAndServe, .{ &srv, port });
+    // Keep the thread handle so we can join it at teardown.
+    var th = try std.Thread.spawn(.{}, server_mod.PreviewServer.listenAndServe, .{ &srv, port });
+    defer th.join();
 
     // Actively wait for the TCP listener
     try waitUntilListening(A, "127.0.0.1", port);
@@ -192,48 +192,53 @@ test "preview serves third_party assets" {
 
     const uri = try std.Uri.parse(url);
 
-    // Retry once or twice to smooth over Windows ReadFile(87)/RST on first connection
+    // Retry a few times to smooth over transient socket issues on Windows
     var status: std.http.Status = .internal_server_error;
     var attempt: usize = 0;
     while (attempt < 3) : (attempt += 1) {
         var req = try client.request(.GET, uri, .{
-            .headers = .{
-                // Force a simple close-after-response behavior
-                .connection = .{ .override = "close" },
-            },
-            // Also tell std.http to not try to keep the connection
+            .headers = .{ .connection = .{ .override = "close" } },
             .keep_alive = false,
         });
         defer req.deinit();
 
         // Send a GET with no body; transient write errors -> retry
-        const send_res = req.sendBodiless();
-        if (send_res) |*_| {} else |e| switch (e) {
-            error.WriteFailed => {
-                std.Thread.sleep(150 * std.time.ns_per_ms);
-                continue;
-            },
-            else => return e,
-        }
-
-        // Receive only the head; transient read errors -> retry
-        var redirect_buf: [1024]u8 = undefined;
-        const resp = req.receiveHead(&redirect_buf) catch |e| switch (e) {
-            error.ReadFailed => {
-                std.Thread.sleep(150 * std.time.ns_per_ms);
-                continue;
-            },
-            error.WriteFailed => {
-                std.Thread.sleep(150 * std.time.ns_per_ms);
-                continue;
-            },
-            else => return e,
+        _ = req.sendBodiless() catch {
+            std.Thread.sleep(150 * std.time.ns_per_ms);
+            continue;
         };
 
-        status = resp.head.status;
-        // We don’t need the body; returning from test soon, so just break.
+        // Read only the response head; transient read errors -> retry
+        var redirect_buf: [1024]u8 = undefined;
+        const head = req.receiveHead(&redirect_buf) catch {
+            std.Thread.sleep(150 * std.time.ns_per_ms);
+            continue;
+        };
+        status = head.head.status;
         break;
     }
 
     try std.testing.expect(status == .ok);
+
+    // Tell the server to stop so our thread can join cleanly (prevents hangs).
+    try httpGetStop(A, port);
+}
+
+fn httpGetStop(a: std.mem.Allocator, port: u16) !void {
+    var client = std.http.Client{ .allocator = a };
+    defer client.deinit();
+
+    const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/__docz_stop", .{port});
+    defer a.free(url);
+    const uri = try std.Uri.parse(url);
+
+    var req = try client.request(.GET, uri, .{
+        .headers = .{ .connection = .{ .override = "close" } },
+        .keep_alive = false,
+    });
+    defer req.deinit();
+
+    _ = req.sendBodiless() catch {};
+    var redirect_buf: [256]u8 = undefined;
+    _ = req.receiveHead(&redirect_buf) catch {};
 }

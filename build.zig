@@ -394,7 +394,22 @@ pub fn build(b: *std.Build) void {
     run_vendor_verify.step.dependOn(&vendor_verify_exe.step);
     const step_vendor_verify = b.step("vendor-verify", "Verify third_party checksums (no HTTP)");
     step_vendor_verify.dependOn(&run_vendor_verify.step);
-
     // Ensure test-all runs vendor verification first
     all_tests.dependOn(step_vendor_verify);
+
+    // --- Print version/build info ---
+    const version_mod = b.createModule(.{
+        .root_source_file = b.path("tools/print_version.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const version_exe = b.addExecutable(.{
+        .name = "docz-version",
+        .root_module = version_mod,
+    });
+    const run_version = b.addRunArtifact(version_exe);
+    const step_version = b.step("version", "Print Docz build info");
+    step_version.dependOn(&run_version.step);
+    // Also run this before test-all so CI logs toolchain
+    all_tests.dependOn(step_version);
 }
