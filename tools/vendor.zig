@@ -6,7 +6,7 @@ pub fn main() !void {
     const A = gpa.allocator();
 
     var it = try std.process.argsWithAllocator(A);
-    defer it.deinit(A);
+    defer it.deinit();
     _ = it.next(); // program name
 
     const cmd = it.next() orelse return usage();
@@ -72,7 +72,7 @@ fn httpGetToFile(a: std.mem.Allocator, url: []const u8, dest_abs: []const u8) !v
     if (std.fs.path.dirname(dest_abs)) |d| try std.fs.cwd().makePath(d);
 
     var client = std.http.Client{ .allocator = a };
-    defer client.deinit(a);
+    defer client.deinit();
 
     var current_url = try a.dupe(u8, url);
     defer a.free(current_url);
@@ -80,17 +80,8 @@ fn httpGetToFile(a: std.mem.Allocator, url: []const u8, dest_abs: []const u8) !v
     var redirects_left: u8 = 5;
 
     while (true) {
-        const current = try std.Uri.parse(current_url);
-
-        var hdr_buf: [8 * 1024]u8 = undefined;
-        var req = try client.open(.GET, current, .{
-            .server_header_buffer = &hdr_buf,
-        });
-        defer req.deinit(a);
-
-        try req.send();
-        try req.finish();
-        try req.wait();
+        const current = try std.Uri.parse(current_url);        var req = try client.request(.GET, current, .{});
+        defer req.deinit();try req.wait();
 
         const code: u16 = @intFromEnum(req.response.status);
         const klass: u16 = code / 100;

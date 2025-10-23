@@ -38,6 +38,15 @@ const RespondOpts = struct {
     extra_headers: []const Header = &.{},
 };
 
+const DEFAULT_SEC_HEADERS: []const Header = &.{
+    .{ .name = "X-Content-Type-Options", .value = "nosniff" },
+    .{ .name = "X-Frame-Options", .value = "DENY" },
+    .{ .name = "Referrer-Policy", .value = "no-referrer" },
+    .{ .name = "Cross-Origin-Opener-Policy", .value = "same-origin" },
+    .{ .name = "Cross-Origin-Embedder-Policy", .value = "require-corp" },
+    .{ .name = "Content-Security-Policy", .value = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; connect-src 'self'" },
+};
+
 const Request = struct {
     allocator: std.mem.Allocator,
     stream: *std.net.Stream,

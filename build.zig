@@ -82,7 +82,6 @@ pub fn build(b: *std.Build) void {
     });
     html_export_mod.addOptions("build_options", build_opts);
     html_export_mod.addImport("docz", docz_module);
-
     // root.zig does: const html_export = @import("html_export");
     docz_module.addImport("html_export", html_export_mod);
 
@@ -203,8 +202,8 @@ pub fn build(b: *std.Build) void {
 
     const vendor_verify = b.addRunArtifact(vendor_tool);
     vendor_verify.addArg("verify");
-    const vendor_verify_step = b.step("vendor-verify", "Verify CHECKSUMS against files");
-    vendor_verify_step.dependOn(&vendor_verify.step);
+    const vendor_verify_step_old = b.step("vendor-verify-old", "Verify CHECKSUMS using full vendor tool");
+    vendor_verify_step_old.dependOn(&vendor_verify.step);
 
     // ─────────────────────────────────────────────
     // Unit tests (docz + converters)
@@ -380,4 +379,22 @@ pub fn build(b: *std.Build) void {
     all_tests.dependOn(integration_step);
     all_tests.dependOn(e2e_step);
     all_tests.dependOn(cli_unit_step);
+
+    // --- Vendor verification (HTTP-free) ---
+    const vendor_verify_mod = b.createModule(.{
+        .root_source_file = b.path("tools/vendor_verify_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const vendor_verify_exe = b.addExecutable(.{
+        .name = "docz-vendor-verify",
+        .root_module = vendor_verify_mod,
+    });
+    const run_vendor_verify = b.addRunArtifact(vendor_verify_exe);
+    run_vendor_verify.step.dependOn(&vendor_verify_exe.step);
+    const step_vendor_verify = b.step("vendor-verify", "Verify third_party checksums (no HTTP)");
+    step_vendor_verify.dependOn(&run_vendor_verify.step);
+
+    // Ensure test-all runs vendor verification first
+    all_tests.dependOn(step_vendor_verify);
 }
