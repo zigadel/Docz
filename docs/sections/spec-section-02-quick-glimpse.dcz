@@ -1,0 +1,47 @@
+@meta(title="Docz — Quick Glimpse", author="Docz Team", date="2025-08-31")
+
+# Quick Glimpse
+
+Docz feels like Markdown when you want speed, and like a tiny, programmable document language when you need precision.
+
+## A tiny tour
+
+**Einstein’s insight:**
+
+@math
+E = mc^2
+@end
+
+@style(class="note")
+This equation shows how mass and energy are interchangeable.
+@end
+
+- Write equations inline: $F = ma$
+- Link like Markdown: [Zig](https://ziglang.org)
+- Style inline with a one‑liner: @(class="highlight"){important}
+- Or the block form when you need multiple lines:
+@style(class="callout")
+Multiple lines of emphasized prose.
+Still readable. Still minimal.
+@end
+
+## Code feels natural
+
+@code(lang="zig")
+const std = @import("std");
+pub fn main() void {
+    std.debug.print("Hello from Zig!\\n", .{});
+}
+@end
+
+## Shorthand vs explicit (equivalent)
+
+# Shorthand Heading
+
+@heading(level=1) Explicit Heading @end
+
+Paragraph (shorthand).
+
+@p
+Paragraph (explicit form).
+@end

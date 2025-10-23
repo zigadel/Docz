@@ -1,0 +1,16 @@
+@font-face{
+  font-family: "LumaSymbols";
+  src: url("../fonts/LumaSymbols-Dozenal.woff2") format("woff2");
+  font-display: swap;
+  unicode-range: U+218A, U+218B; /* ↊, ↋ */
+}
+
+/* Make KaTeX text prefer the tiny 2-glyph font for ↊/↋, then fall back */
+.katex .text, .katex .mord.text, .katex .mtext {
+  font-family: "LumaSymbols", KaTeX_Main, KaTeX_Math,
+               "Noto Sans Symbols 2", "Segoe UI Symbol", "Apple Symbols",
+               "DejaVu Sans", sans-serif;
+}
+
+/* (Optional) Let prose outside math also show ↊/↋ reliably */
+body { font-family: "LumaSymbols", var(--docz-font-sans); }

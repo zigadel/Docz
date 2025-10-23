@@ -11,6 +11,25 @@ const latex_export = @import("latex_export");
 
 pub const Kind = enum { dcz, md, html, tex };
 
+/// Try a handful of possible symbol names for the Markdown→DCZ importer.
+/// If none exist in this build, return a specific error instead of @compileError.
+fn importMarkdownToDczCompat(alloc: std.mem.Allocator, input: []const u8) ![]u8 {
+    if (comptime @hasDecl(md_import, "importMarkdownToDcz")) {
+        return md_import.importMarkdownToDcz(alloc, input);
+    } else if (comptime @hasDecl(md_import, "importToDcz")) {
+        return md_import.importToDcz(alloc, input);
+    } else if (comptime @hasDecl(md_import, "importMdToDcz")) {
+        return md_import.importMdToDcz(alloc, input);
+    } else if (comptime @hasDecl(md_import, "fromMarkdownToDcz")) {
+        return md_import.fromMarkdownToDcz(alloc, input);
+    } else if (comptime @hasDecl(md_import, "importMarkdown")) {
+        // Some trees expose a generic name
+        return md_import.importMarkdown(alloc, input);
+    } else {
+        return error.MarkdownImportUnavailable;
+    }
+}
+
 fn detectKindFromPath(p: []const u8) ?Kind {
     const ext = std.fs.path.extension(p);
     if (ext.len == 0) return null;
@@ -24,7 +43,22 @@ fn detectKindFromPath(p: []const u8) ?Kind {
 fn readFileAlloc(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
     var f = try std.fs.cwd().openFile(path, .{});
     defer f.close();
-    return try f.readToEndAlloc(alloc, 1 << 26);
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(alloc);
+
+    var buf: [16 * 1024]u8 = undefined;
+    var total: usize = 0;
+    while (true) {
+        const n = try f.read(&buf);
+        if (n == 0) break;
+        total += n;
+        // optional safety cap (~64 MiB)
+        if (total > (1 << 26)) return error.FileTooLarge;
+        try out.appendSlice(alloc, buf[0..n]);
+    }
+
+    return try out.toOwnedSlice(alloc);
 }
 
 fn writeFile(path: []const u8, data: []const u8) !void {
@@ -37,16 +71,12 @@ fn writeFile(path: []const u8, data: []const u8) !void {
     try f.writeAll(data);
 }
 
-// Robust: same directory as input; just replace extension.
 fn replaceExt(alloc: std.mem.Allocator, path: []const u8, new_ext_with_dot: []const u8) ![]u8 {
     const dir = std.fs.path.dirname(path);
-    const stem = std.fs.path.stem(path); // base name without extension
-
+    const stem = std.fs.path.stem(path);
     if (dir) |d| {
-        // docs/spec-file.html -> docs/spec-file.css
         return try std.fmt.allocPrint(alloc, "{s}{c}{s}{s}", .{ d, std.fs.path.sep, stem, new_ext_with_dot });
     } else {
-        // spec-file.html -> spec-file.css
         return try std.fmt.allocPrint(alloc, "{s}{s}", .{ stem, new_ext_with_dot });
     }
 }
@@ -55,20 +85,20 @@ fn insertCssLinkBeforeHeadClose(alloc: std.mem.Allocator, html: []const u8, href
     const needle = "</head>";
     const idx_opt = std.mem.indexOf(u8, html, needle);
     if (idx_opt == null) {
-        // no </head>? prepend for robustness
         return try std.fmt.allocPrint(alloc, "<link rel=\"stylesheet\" href=\"{s}\">\n{s}", .{ href, html });
     }
     const idx = idx_opt.?;
-    var out = std.ArrayList(u8).init(alloc);
-    errdefer out.deinit();
 
-    try out.appendSlice(html[0..idx]);
-    try out.appendSlice("<link rel=\"stylesheet\" href=\"");
-    try out.appendSlice(href);
-    try out.appendSlice("\">\n");
-    try out.appendSlice(html[idx..]);
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(alloc);
 
-    return out.toOwnedSlice();
+    try out.appendSlice(alloc, html[0..idx]);
+    try out.appendSlice(alloc, "<link rel=\"stylesheet\" href=\"");
+    try out.appendSlice(alloc, href);
+    try out.appendSlice(alloc, "\">\n");
+    try out.appendSlice(alloc, html[idx..]);
+
+    return out.toOwnedSlice(alloc);
 }
 
 fn writeIndent(w: anytype, n: usize) !void {
@@ -76,7 +106,6 @@ fn writeIndent(w: anytype, n: usize) !void {
     while (k < n) : (k += 1) try w.writeByte(' ');
 }
 
-// ── Pretty-printer helpers (only what we use) ────────────────
 fn isWs(b: u8) bool {
     return b == ' ' or b == '\t' or b == '\r';
 }
@@ -92,7 +121,6 @@ fn eqLower(a: []const u8, b: []const u8) bool {
     return true;
 }
 fn isVoidTag(name: []const u8) bool {
-    // HTML5 void elements
     return eqLower(name, "area") or eqLower(name, "base") or eqLower(name, "br") or
         eqLower(name, "col") or eqLower(name, "embed") or eqLower(name, "hr") or
         eqLower(name, "img") or eqLower(name, "input") or eqLower(name, "link") or
@@ -100,10 +128,9 @@ fn isVoidTag(name: []const u8) bool {
         eqLower(name, "track") or eqLower(name, "wbr");
 }
 
-// ── Pretty printer (single implementation) ───────────────────
 fn prettyHtml(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).init(alloc);
-    errdefer out.deinit();
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(alloc);
 
     var indent: usize = 0;
     var i: usize = 0;
@@ -112,15 +139,14 @@ fn prettyHtml(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
         const line_start = i;
         while (i < html.len and html[i] != '\n') : (i += 1) {}
         const raw = html[line_start..i];
-        if (i < html.len and html[i] == '\n') i += 1; // consume newline
+        if (i < html.len and html[i] == '\n') i += 1;
 
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0) {
-            try out.append('\n');
+            try out.append(alloc, '\n');
             continue;
         }
 
-        // Analyze the line
         var j: usize = 0;
         while (j < line.len and isWs(line[j])) : (j += 1) {}
 
@@ -134,10 +160,8 @@ fn prettyHtml(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
             const is_close = after_lt < line.len and line[after_lt] == '/';
             const is_decl_or_comment = after_lt < line.len and (line[after_lt] == '!' or line[after_lt] == '?');
 
-            // Parse tag name
             var name_start: usize = after_lt;
-            if (is_close) name_start += 1; // runtime increment only
-
+            if (is_close) name_start += 1;
             while (name_start < line.len and isWs(line[name_start])) : (name_start += 1) {}
 
             var name_end = name_start;
@@ -147,37 +171,31 @@ fn prettyHtml(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
             }
             const tag_name = if (name_end > name_start) line[name_start..name_end] else line[name_start..name_start];
 
-            // Self-close syntax and void detection
             const self_closed_syntax = line.len >= 2 and line[line.len - 2] == '/' and line[line.len - 1] == '>';
             const voidish = isVoidTag(tag_name);
-
-            // Does this same line contain a closing tag too? (e.g., <h1>hi</h1>)
             const has_inline_close = std.mem.indexOf(u8, line, "</") != null;
 
             if (is_close and !is_decl_or_comment) {
                 if (indent > 0) pre_decr = 1;
             } else if (!is_decl_or_comment and !self_closed_syntax and !voidish) {
-                if (!has_inline_close) {
-                    post_incr = 1;
-                }
+                if (!has_inline_close) post_incr = 1;
             }
         }
 
         if (pre_decr > 0 and indent >= pre_decr) indent -= pre_decr;
 
-        // Emit line with current indent
-        try out.appendNTimes(' ', indent * 2);
-        try out.appendSlice(line);
-        try out.append('\n');
+        try out.appendNTimes(alloc, ' ', indent * 2);
+        try out.appendSlice(alloc, line);
+        try out.append(alloc, '\n');
 
         indent += post_incr;
     }
 
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(alloc);
 }
 
 // ─────────────────────────────────────────────────────────────
-// PUBLIC ENTRY (called by main.zig)
+// PUBLIC ENTRY
 // ─────────────────────────────────────────────────────────────
 pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     const usage =
@@ -189,15 +207,12 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
         return error.Invalid;
     };
 
-    // flags
     var out_path: ?[]const u8 = null;
 
-    // NOTE: identifier can't be named "inline" in Zig; use inline_css
     const CssMode = enum { inline_css, file };
     var css_mode: CssMode = .inline_css;
     var css_file: ?[]const u8 = null;
 
-    // pretty printing: default ON
     var pretty: bool = true;
 
     while (it.next()) |arg| {
@@ -211,11 +226,7 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
                 std.debug.print("convert: --css requires a value: inline|file\n", .{});
                 return error.Invalid;
             };
-            if (std.mem.eql(u8, v, "inline")) {
-                css_mode = .inline_css;
-            } else if (std.mem.eql(u8, v, "file")) {
-                css_mode = .file;
-            } else {
+            if (std.mem.eql(u8, v, "inline")) css_mode = .inline_css else if (std.mem.eql(u8, v, "file")) css_mode = .file else {
                 std.debug.print("convert: --css must be 'inline' or 'file' (got '{s}')\n", .{v});
                 return error.Invalid;
             }
@@ -253,7 +264,6 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     defer if (out_buf.len != 0 and out_buf.ptr != input.ptr) alloc.free(out_buf);
 
     if (in_kind == .dcz) {
-        // DCZ -> AST
         const tokens = try docz.Tokenizer.tokenize(input, alloc);
         defer {
             docz.Tokenizer.freeTokens(alloc, tokens);
@@ -261,7 +271,7 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
         }
 
         var ast = try docz.Parser.parse(tokens, alloc);
-        defer ast.deinit();
+        defer ast.deinit(alloc);
 
         const out_kind = if (out_path) |p| detectKindFromPath(p) else null;
 
@@ -271,45 +281,32 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
             .md => out_buf = try md_export.exportAstToMarkdown(&ast, alloc),
 
             .html => {
-                // 1) start with inline <style> included by the exporter
                 const html_inline = try html_export.exportHtml(&ast, alloc);
                 errdefer alloc.free(html_inline);
 
                 if (css_mode == .file) {
-                    // 2) decide CSS path (+ ownership)
                     var css_path: []const u8 = undefined;
                     var css_path_needs_free = false;
                     if (css_file) |p| {
-                        css_path = p; // user-provided; not owned
+                        css_path = p;
                     } else if (out_path) |to_path| {
                         css_path = try replaceExt(alloc, to_path, ".css");
-                        css_path_needs_free = true; // owned
+                        css_path_needs_free = true;
                     } else {
-                        css_path = "docz.css"; // fallback; not owned
+                        css_path = "docz.css";
                     }
                     defer if (css_path_needs_free) alloc.free(css_path);
 
-                    // 3) validate extension if present
-                    const ext = std.fs.path.extension(css_path);
-                    if (ext.len != 0 and !std.ascii.eqlIgnoreCase(ext, ".css")) {
-                        std.debug.print("convert: --css-file should end with .css (got {s})\n", .{css_path});
-                        return error.Invalid;
-                    }
-
-                    // 4) collect CSS from AST and write it
-                    const css_blob = try html_export.collectInlineCss(&ast, alloc);
+                    const css_blob = try html_export.collectInlineCss(html_inline, alloc);
                     defer alloc.free(css_blob);
                     try writeFile(css_path, css_blob);
 
-                    // 5) strip first <style>…</style> from HTML
                     const html_no_style = try html_export.stripFirstStyleBlock(html_inline, alloc);
                     alloc.free(html_inline);
 
-                    // 6) inject <link> before </head>
                     const html_linked = try insertCssLinkBeforeHeadClose(alloc, html_no_style, css_path);
                     alloc.free(html_no_style);
 
-                    // 7) pretty if requested
                     if (pretty) {
                         const pretty_buf = try prettyHtml(alloc, html_linked);
                         alloc.free(html_linked);
@@ -318,7 +315,6 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
                         out_buf = html_linked;
                     }
                 } else {
-                    // inline mode (default)
                     if (pretty) {
                         const pretty_buf = try prettyHtml(alloc, html_inline);
                         alloc.free(html_inline);
@@ -333,9 +329,20 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
             .dcz => unreachable,
         }
     } else {
-        // Import -> DCZ
         switch (in_kind) {
-            .md => out_buf = try md_import.importMarkdownToDcz(alloc, input),
+            .md => {
+                out_buf = importMarkdownToDczCompat(alloc, input) catch |e| {
+                    if (e == error.MarkdownImportUnavailable) {
+                        std.debug.print(
+                            "convert: this build lacks a Markdown→DCZ importer in md_import; " ++
+                                "rebuild with the markdown importer or use .dcz/.html/.tex.\n",
+                            .{},
+                        );
+                        return error.Invalid;
+                    }
+                    return e;
+                };
+            },
             .html => out_buf = try html_import.importHtmlToDcz(alloc, input),
             .tex => out_buf = try latex_import.importLatexToDcz(alloc, input),
             .dcz => unreachable,
@@ -349,7 +356,6 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
         }
         try writeFile(p, out_buf);
     } else {
-        // Print buffer
         std.debug.print("{s}", .{out_buf});
     }
 }

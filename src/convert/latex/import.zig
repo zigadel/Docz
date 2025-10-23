@@ -1,17 +1,43 @@
 const std = @import("std");
 
+// -----------------------------------------------------------------------------
+// Small writer adapter for ArrayList(u8) on this Zig version
+//   - No std.io.Writer dependency
+//   - Supports writeAll + print via std.fmt.format(self, ...)
+// -----------------------------------------------------------------------------
+const ListWriter = struct {
+    list: *std.ArrayList(u8),
+    alloc: std.mem.Allocator,
+
+    pub fn write(self: *ListWriter, bytes: []const u8) !usize {
+        try self.list.appendSlice(self.alloc, bytes);
+        return bytes.len;
+    }
+
+    pub fn writeAll(self: *ListWriter, bytes: []const u8) !void {
+        _ = try self.write(bytes);
+    }
+
+    // zig 0.16 friendly: allocate formatted text, append, free
+    pub fn print(self: *ListWriter, comptime fmt: []const u8, args: anytype) !void {
+        const s = try std.fmt.allocPrint(self.alloc, fmt, args);
+        defer self.alloc.free(s);
+        try self.list.appendSlice(self.alloc, s);
+    }
+};
+
 // -------------------------
 // Small helpers
 // -------------------------
 
-fn flushParagraph(out: *std.ArrayList(u8), para: *std.ArrayList(u8)) !void {
+fn flushParagraph(A: std.mem.Allocator, out: *std.ArrayList(u8), para: *std.ArrayList(u8)) !void {
     if (para.items.len == 0) return;
 
     // Trim leading/trailing whitespace in the paragraph buffer
     const trimmed = std.mem.trim(u8, para.items, " \t\r\n");
     if (trimmed.len != 0) {
-        try out.appendSlice(trimmed);
-        try out.append('\n');
+        try out.appendSlice(A, trimmed);
+        try out.append(A, '\n');
     }
 
     para.clearRetainingCapacity();
@@ -104,9 +130,9 @@ fn readEnvironment(tex: []const u8, start: usize) ?struct {
 }
 
 /// Collapse all whitespace runs to a single space and trim ends.
-fn collapseSpaces(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).init(allocator);
-    errdefer out.deinit();
+fn collapseSpaces(A: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(A);
 
     var i: usize = 0;
     var in_space = false;
@@ -115,11 +141,11 @@ fn collapseSpaces(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
         if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
             if (!in_space) {
                 in_space = true;
-                try out.append(' ');
+                try out.append(A, ' ');
             }
         } else {
             in_space = false;
-            try out.append(c);
+            try out.append(A, c);
         }
     }
     // trim leading/trailing single space
@@ -128,18 +154,18 @@ fn collapseSpaces(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
     while (out.items.len != 0 and out.items[out.items.len - 1] == ' ')
         _ = out.pop();
 
-    return out.toOwnedSlice();
+    return try out.toOwnedSlice(A);
 }
 
 /// Remove all backslashes, then trim spaces.
-fn stripBackslashesAndTrim(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
-    var tmp = std.ArrayList(u8).init(allocator);
-    errdefer tmp.deinit();
+fn stripBackslashesAndTrim(A: std.mem.Allocator, s: []const u8) ![]u8 {
+    var tmp = std.ArrayList(u8){};
+    errdefer tmp.deinit(A);
     for (s) |ch| {
-        if (ch != '\\') try tmp.append(ch);
+        if (ch != '\\') try tmp.append(A, ch);
     }
     const v = trimSpaces(tmp.items);
-    return allocator.dupe(u8, v);
+    return A.dupe(u8, v);
 }
 
 // -------------------------
@@ -199,12 +225,16 @@ fn flushPara(wr: anytype, buf: *std.ArrayList(u8)) !void {
 
 /// Convert a small, practical subset of LaTeX to .dcz text.
 /// Non-matching commands are skipped; plain text becomes paragraphs.
-pub fn importLatexToDcz(allocator: std.mem.Allocator, tex: []const u8) ![]u8 {
-    var out_buf = std.ArrayList(u8).init(allocator);
-    errdefer out_buf.deinit();
+pub fn importLatexToDcz(A: std.mem.Allocator, tex: []const u8) ![]u8 {
+    var out_buf = std.ArrayList(u8){};
+    errdefer out_buf.deinit(A);
 
-    var para_buf = std.ArrayList(u8).init(allocator);
-    defer para_buf.deinit();
+    var para_buf = std.ArrayList(u8){};
+    defer para_buf.deinit(A);
+
+    // writer over out_buf
+    var lw = ListWriter{ .list = &out_buf, .alloc = A };
+    const wr = &lw;
 
     var i: usize = 0;
     while (i < tex.len) {
@@ -214,7 +244,7 @@ pub fn importLatexToDcz(allocator: std.mem.Allocator, tex: []const u8) ![]u8 {
         if (c == '\n') {
             const next_nl: u8 = if (i + 1 < tex.len) tex[i + 1] else 0;
             if (next_nl == '\n') {
-                try flushParagraph(&out_buf, &para_buf);
+                try flushParagraph(A, &out_buf, &para_buf);
                 i += 2;
                 continue;
             }
@@ -231,7 +261,7 @@ pub fn importLatexToDcz(allocator: std.mem.Allocator, tex: []const u8) ![]u8 {
                         para_buf.items.len == 0 or
                         (para_buf.items[para_buf.items.len - 1] != ' ' and
                             para_buf.items[para_buf.items.len - 1] != '\n');
-                    if (need_space) try para_buf.append(' ');
+                    if (need_space) try para_buf.append(A, ' ');
                     i += 2;
                     continue;
                 }
@@ -239,25 +269,25 @@ pub fn importLatexToDcz(allocator: std.mem.Allocator, tex: []const u8) ![]u8 {
 
             // 1) Environments: \begin{...} ... \end{...}
             if (readEnvironment(tex, i)) |env| {
-                try flushParagraph(&out_buf, &para_buf);
+                try flushParagraph(A, &out_buf, &para_buf);
 
                 if (std.ascii.eqlIgnoreCase(env.env, "verbatim")) {
-                    try emitCode(out_buf.writer(), env.body);
+                    try emitCode(wr, env.body);
                 } else if (std.ascii.eqlIgnoreCase(env.env, "equation") or
                     std.ascii.eqlIgnoreCase(env.env, "equation*"))
                 {
                     // Normalize whitespace inside math.
-                    const collapsed = try collapseSpaces(allocator, env.body);
-                    defer allocator.free(collapsed);
+                    const collapsed = try collapseSpaces(A, env.body);
+                    defer A.free(collapsed);
 
-                    // NEW: trim any trailing '\' (and spaces before it) from the math body.
+                    // Trim any trailing '\' (and spaces before it) from the math body.
                     var view = collapsed;
                     while (view.len > 0 and (view[view.len - 1] == ' ' or view[view.len - 1] == '\\')) {
                         view = view[0 .. view.len - 1];
                     }
 
                     if (view.len != 0) {
-                        try emitMath(out_buf.writer(), view);
+                        try emitMath(wr, view);
                     }
                 } else {
                     // Unknown env: ignore for now.
@@ -276,11 +306,11 @@ pub fn importLatexToDcz(allocator: std.mem.Allocator, tex: []const u8) ![]u8 {
                     std.ascii.eqlIgnoreCase(name, "author"))
                 {
                     if (readBalancedBraces(tex, cmd.next)) |grp| {
-                        try flushParagraph(&out_buf, &para_buf);
+                        try flushParagraph(A, &out_buf, &para_buf);
                         if (std.ascii.eqlIgnoreCase(name, "title")) {
-                            try emitTitle(out_buf.writer(), grp.body);
+                            try emitTitle(wr, grp.body);
                         } else {
-                            try emitMetaKV(out_buf.writer(), "author", grp.body);
+                            try emitMetaKV(wr, "author", grp.body);
                         }
                         i = grp.next;
                         continue;
@@ -293,9 +323,10 @@ pub fn importLatexToDcz(allocator: std.mem.Allocator, tex: []const u8) ![]u8 {
                     std.ascii.eqlIgnoreCase(name, "subsubsection"))
                 {
                     if (readBalancedBraces(tex, cmd.next)) |grp| {
-                        try flushParagraph(&out_buf, &para_buf);
-                        const lvl: u8 = if (std.ascii.eqlIgnoreCase(name, "section")) 1 else if (std.ascii.eqlIgnoreCase(name, "subsection")) 2 else 3;
-                        try emitHeading(out_buf.writer(), lvl, grp.body);
+                        try flushParagraph(A, &out_buf, &para_buf);
+                        const lvl: u8 =
+                            if (std.ascii.eqlIgnoreCase(name, "section")) 1 else if (std.ascii.eqlIgnoreCase(name, "subsection")) 2 else 3;
+                        try emitHeading(wr, lvl, grp.body);
                         i = grp.next;
                         continue;
                     }
@@ -306,8 +337,8 @@ pub fn importLatexToDcz(allocator: std.mem.Allocator, tex: []const u8) ![]u8 {
                     const opt = readOptionalBracket(tex, cmd.next); // ignored for now
                     const after = if (opt) |o| o.next else cmd.next;
                     if (readBalancedBraces(tex, after)) |grp| {
-                        try flushParagraph(&out_buf, &para_buf);
-                        try emitImage(out_buf.writer(), grp.body);
+                        try flushParagraph(A, &out_buf, &para_buf);
+                        try emitImage(wr, grp.body);
                         i = grp.next;
                         continue;
                     }
@@ -324,22 +355,22 @@ pub fn importLatexToDcz(allocator: std.mem.Allocator, tex: []const u8) ![]u8 {
         }
 
         // Default: accumulate paragraph text
-        try para_buf.append(c);
+        try para_buf.append(A, c);
         i += 1;
     }
 
     // Final flush
-    try flushParagraph(&out_buf, &para_buf);
-    return out_buf.toOwnedSlice();
+    try flushParagraph(A, &out_buf, &para_buf);
+    return try out_buf.toOwnedSlice(A);
 }
 
 // -------------------------
 // Low-level bracket readers
 // -------------------------
 
-fn readBraced(allocator: std.mem.Allocator, tex: []const u8, idx: *usize) ![]u8 {
+fn readBraced(A: std.mem.Allocator, tex: []const u8, idx: *usize) ![]u8 {
     var i = idx.*;
-    if (i >= tex.len or tex[i] != '{') return allocator.alloc(u8, 0);
+    if (i >= tex.len or tex[i] != '{') return A.alloc(u8, 0);
     i += 1;
     const start = i;
     var depth: usize = 1;
@@ -348,12 +379,12 @@ fn readBraced(allocator: std.mem.Allocator, tex: []const u8, idx: *usize) ![]u8 
         i += 1;
     }
     idx.* = i;
-    return allocator.dupe(u8, tex[start .. i - 1]);
+    return A.dupe(u8, tex[start .. i - 1]);
 }
 
-fn readBracketed(allocator: std.mem.Allocator, tex: []const u8, idx: *usize) ![]u8 {
+fn readBracketed(A: std.mem.Allocator, tex: []const u8, idx: *usize) ![]u8 {
     var i = idx.*;
-    if (i >= tex.len or tex[i] != '[') return allocator.alloc(u8, 0);
+    if (i >= tex.len or tex[i] != '[') return A.alloc(u8, 0);
     i += 1;
     const start = i;
     var depth: usize = 1;
@@ -362,7 +393,7 @@ fn readBracketed(allocator: std.mem.Allocator, tex: []const u8, idx: *usize) ![]
         i += 1;
     }
     idx.* = i;
-    return allocator.dupe(u8, tex[start .. i - 1]);
+    return A.dupe(u8, tex[start .. i - 1]);
 }
 
 // -------------------------

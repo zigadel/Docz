@@ -14,16 +14,16 @@ pub fn insertCssLinkBeforeHeadClose(
     }
     const idx = idx_opt.?;
 
-    var out = std.ArrayList(u8).init(alloc);
-    errdefer out.deinit();
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(alloc);
 
-    try out.appendSlice(html[0..idx]);
-    try out.appendSlice("<link rel=\"stylesheet\" href=\"");
-    try out.appendSlice(href);
-    try out.appendSlice("\">\n");
-    try out.appendSlice(html[idx..]);
+    try out.appendSlice(alloc, html[0..idx]);
+    try out.appendSlice(alloc, "<link rel=\"stylesheet\" href=\"");
+    try out.appendSlice(alloc, href);
+    try out.appendSlice(alloc, "\">\n");
+    try out.appendSlice(alloc, html[idx..]);
 
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(alloc);
 }
 
 pub fn insertBeforeHeadClose(
@@ -33,12 +33,12 @@ pub fn insertBeforeHeadClose(
 ) ![]u8 {
     const needle = "</head>";
     if (std.mem.indexOf(u8, html, needle)) |idx| {
-        var out = std.ArrayList(u8).init(alloc);
-        errdefer out.deinit();
-        try out.appendSlice(html[0..idx]);
-        try out.appendSlice(snippet);
-        try out.appendSlice(html[idx..]);
-        return out.toOwnedSlice();
+        var out = std.ArrayList(u8){};
+        errdefer out.deinit(alloc);
+        try out.appendSlice(alloc, html[0..idx]);
+        try out.appendSlice(alloc, snippet);
+        try out.appendSlice(alloc, html[idx..]);
+        return out.toOwnedSlice(alloc);
     }
     return std.fmt.allocPrint(alloc, "{s}{s}", .{ snippet, html });
 }
@@ -90,12 +90,12 @@ pub fn injectLiveScript(alloc: std.mem.Allocator, html: []const u8, marker_name:
     errdefer alloc.free(with_url);
 
     if (idx_opt) |idx| {
-        var out = std.ArrayList(u8).init(alloc);
-        errdefer out.deinit();
-        try out.appendSlice(html[0..idx]);
-        try out.appendSlice(with_url);
-        try out.appendSlice(html[idx..]);
-        return out.toOwnedSlice();
+        var out = std.ArrayList(u8){};
+        errdefer out.deinit(alloc);
+        try out.appendSlice(alloc, html[0..idx]);
+        try out.appendSlice(alloc, with_url);
+        try out.appendSlice(alloc, html[idx..]);
+        return out.toOwnedSlice(alloc);
     }
 
     // Fallback: append at end if no </body>
@@ -104,8 +104,8 @@ pub fn injectLiveScript(alloc: std.mem.Allocator, html: []const u8, marker_name:
 
 // Lightweight pretty printer for readability in dev
 pub fn prettyHtml(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).init(alloc);
-    errdefer out.deinit();
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(alloc);
 
     var indent: usize = 0;
     var i: usize = 0;
@@ -118,7 +118,7 @@ pub fn prettyHtml(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
 
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0) {
-            try out.append('\n');
+            try out.append(alloc, '\n');
             continue;
         }
 
@@ -163,12 +163,12 @@ pub fn prettyHtml(alloc: std.mem.Allocator, html: []const u8) ![]u8 {
 
         if (pre_decr > 0 and indent >= pre_decr) indent -= pre_decr;
 
-        try out.appendNTimes(' ', indent * 2);
-        try out.appendSlice(line);
-        try out.append('\n');
+        try out.appendNTimes(alloc, ' ', indent * 2);
+        try out.appendSlice(alloc, line);
+        try out.append(alloc, '\n');
 
         indent += post_incr;
     }
 
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(alloc);
 }

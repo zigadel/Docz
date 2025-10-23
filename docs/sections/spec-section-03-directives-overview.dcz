@@ -1,0 +1,119 @@
+@meta(title="Docz Spec — Section 3: Directives Overview", author="Docz Authors")
+
+# 3. Directives Overview
+
+Directives are Docz’s core building blocks. A directive is an explicit block with a name, optional attributes, and content:
+@code(lang="text")
+@name(attr="value", attr2="value2")
+  content…
+@end
+@end
+
+Directives are designed to be **unambiguous** for parsers and **ergonomic** for humans. Most everyday constructs also have a **shorthand** form that compiles to the same output.
+
+## 3.1 Shorthand vs Explicit
+
+Shorthand is fast to write; explicit form is canonical and guaranteed to be unambiguous. Both are equivalent.
+
+@style(class="example-grid")
+@code(lang="dcz")
+# Shorthand
+# Title (h1)
+## Section (h2)
+
+# Explicit
+@heading(level=1) Title @end
+@heading(level=2) Section @end
+@end
+@end
+
+Paragraphs:
+@style(class="example-grid")
+@code(lang="dcz")
+# Shorthand
+This is a paragraph.
+
+# Explicit
+@p
+This is a paragraph.
+@end
+@end
+@end
+
+## 3.2 Inline vs Block
+
+**Inline directives** live inside a paragraph; **block directives** span multiple lines.
+
+Inline styling (two ways — explicit and shorthand):
+
+@style(class="example-grid")
+@code(lang="dcz")
+# Explicit inline style
+The force is @style(class="highlight") mass @end important.
+
+# Shorthand inline style
+The force is @(class="highlight"){mass} important.
+@end
+@end
+
+Block examples:
+@style(class="example-grid")
+@code(lang="dcz")
+@math
+E = mc^2
+@end
+
+@code(lang="bash")
+zig build run -- run ./examples/hello.dcz
+@end
+@end
+@end
+
+## 3.3 Equivalence & Parsing Guarantees
+
+- Shorthand is **syntactic sugar** for directives.
+- Every shorthand form has a stable explicit counterpart.
+- Parsers and tools can always normalize with `docz convert --explicit`.
+
+## 3.4 Raw HTML Escape Hatch
+
+Docz lets you embed raw HTML when you need full control (e.g., `<details>`, `<canvas>`, or custom widgets). Prefer Docz directives when possible.
+
+@code(lang="dcz")
+<p class="note">Raw HTML block — use sparingly.</p>
+@end
+
+## 3.5 Attribute Rules
+
+- Attributes use `key="value"` (double quotes required for safety/clarity).
+- Booleans are strings: `enabled="true"` / `enabled="false"` (future-proof).
+- Multiple classes go in one string: `class="prose text-sm italic"`.
+- Prefer `class="..."` for utility classes (Tailwind or your own); use `style="..."` for ad‑hoc CSS.
+
+Inline style examples:
+@style(class="example-grid")
+@code(lang="dcz")
+# Utility-first
+@style(class="text-blue-600 font-semibold") Link @end
+
+# Ad-hoc CSS
+@style(style="color:#0a0; text-decoration:underline") Green @end
+@end
+@end
+
+## 3.6 Nesting (Inline + Block)
+
+Directives compose. You can nest inline styles inside math explanations or headings inside styled callouts. Keep nesting shallow for readability.
+
+@style(class="example-grid")
+@code(lang="dcz")
+@style(class="callout")
+  @heading(level=3) Note @end
+  You can emphasize @(class="underline"){key} terms even inside rich blocks.
+@end
+@end
+@end
+
+---
+
+**Next:** Section 4 covers the standard block directives in detail (headings, paragraphs, math, code, and style).

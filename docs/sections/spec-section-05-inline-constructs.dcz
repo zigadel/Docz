@@ -1,0 +1,70 @@
+@meta(title="Docz Spec — Section 5: Inline Constructs", author="Docz Authors")
+
+# 5. Inline Constructs
+
+Inline constructs let you style and enrich text *without* breaking the paragraph flow.  
+Docz supports Markdown‑style emphasis, inline code, links, inline math, and inline `@style` spans.
+
+## 5.1 Emphasis, Strong, Code, Links
+
+This is *emphasis*, this is **strong**, and this is `inline code` inside a sentence.  
+Links use Markdown shorthand: [Zig](https://ziglang.org).
+
+## 5.2 Inline Math
+
+Inline math is recognized by KaTeX delimiters and rendered at runtime:
+
+- Newton's 2nd law: $F = ma$
+- Binomial: $(a+b)^2 = a^2 + 2ab + b^2$
+
+> Tip: For *display* math, use a `@math ... @end` block (see Section 4.4).
+
+## 5.3 Inline Styling with @style
+
+Use `@style(...) ... @end` to decorate *part* of a sentence.
+
+- Tailwind-style classes (if Tailwind is linked), or any CSS class names:
+  Energy is @style(class="font-semibold text-blue-600") important @end in physics.
+
+- Raw CSS via the `style` attribute (works with or without Tailwind):
+  Colors can suggest roles: @style(style="color:#16a34a; text-decoration:underline") success @end vs. @style(style="color:#dc2626") failure @end.
+
+- Combine with other inline features safely:
+  You can **bold** @style(class="px-1 rounded bg-yellow-100") highlighted @end words and add `code` in the same sentence.
+
+## 5.4 Interaction Hooks (HTML-like)
+
+With actions enabled, you can attach HTML-like event hooks to inline spans:
+
+@style(class="cursor-pointer underline" on-click="showNote('energy')")
+Click for a quick note on energy
+@end
+ — see Section 8 for configuring handlers (plain JS or WASM-backed).
+
+## 5.5 Inline vs Math Styling
+
+Inside *math content*, use KaTeX’s safe HTML helpers (enabled by Docz) instead of `@style`:
+
+@math
+\class{varE}{E} = \class{varm}{m}\class{varc}{c}^{2}
+@end
+
+Then style those classes in CSS:
+
+@css
+.varE { color: #ca8a04; }   /* amber */
+.varm { color: #16a34a; }   /* green */
+.varc { color: #2563eb; }   /* blue  */
+@end
+
+> Why? `@style` is parsed by Docz in prose, not inside KaTeX. KaTeX renders math to HTML; we rely on `\class{...}{...}` there.
+
+## 5.6 Do/Don’t
+
+- **Do** keep inline spans small and purposeful.  
+- **Do** prefer `class` when using a theme; use `style` for quick one-offs.  
+- **Don’t** try to nest `@style` *inside* `$...$` or `@math`; use `\class{}` instead.
+
+---
+
+That’s it for inline constructs. Next: lists, blockquotes, and structural flow.

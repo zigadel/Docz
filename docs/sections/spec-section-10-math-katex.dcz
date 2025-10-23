@@ -1,0 +1,239 @@
+@meta(title="Docz Spec — Section 10: Math & KaTeX", author="Docz Authors")
+
+# 10. Math & KaTeX
+
+KaTeX renders LaTeX-style math to **pure HTML+CSS**, which makes it fast, portable, and styleable.
+Docz integrates KaTeX by default (when vendored assets are present) with inline `$...$` and block `@math ... @end`
+delimiters. The result is accessible markup you can **style and interact with** using normal Docz tools.
+
+## 10.1 Inline vs. Block
+
+- Inline math uses `$...$` (or `\(...\)`): energy is $E = mc^2$.
+- Display/block math uses the `@math` directive:
+
+@math
+\int_{-\infty}^{\infty} e^{-x^2} \, dx = \sqrt{\pi}
+@end
+
+## 10.2 Styling sub‑expressions (safe helpers)
+
+Docz enables a minimal, **whitelisted** set of KaTeX HTML helpers so you can wrap parts of an expression with classes,
+inline styles, or data attributes. These are enabled via the Docz KaTeX boot with a strict `trust` callback.
+
+- `\class{cls}{content}` → adds a CSS class (alias of `\htmlClass`).
+- `\htmlStyle{css}{content}` → adds inline style.
+- `\htmlData{key}{value}{content}` → adds `data-key="value"`.
+
+> These helpers are allowed specifically in Docz’s KaTeX config. They do **not** enable arbitrary HTML; they only produce
+> safe `<span>` wrappers around the math fragment.
+
+### Example (classes + Tailwind or plain CSS)
+
+@math
+\class{var-e}{E} = \class{var-m}{m}\class{var-c}{c}^{2}
+@end
+
+@style(class="note")
+If Tailwind is available, you can directly use utility classes, e.g.
+` \class{text-yellow-500 underline}{E} `. Without Tailwind, use your own CSS targeting `.var-e`, `.var-m`, etc.
+@end
+
+### Example (inline style)
+
+@math
+\htmlStyle{color:#eab308; text-decoration:underline}{E} = mc^{2}
+@end
+
+### Example (data attributes for behavior)
+
+@math
+\htmlData{info}{Energy}{\class{var-e}{E}} = \class{var-m}{m}\,\class{var-c}{c}^{2}
+@end
+
+Now you can attach behavior to `span[data-info]` (tooltips, modals) with `@script` (see §10.4).
+
+## 10.3 Accessible semantics
+
+- KaTeX emits accessible nodes; keep surrounding text descriptive.
+- If you add interactivity (click/hover), include ARIA roles and focus styles in your CSS or components.
+
+## 10.4 Interactivity (hover/click: tooltip + modal)
+
+Below is a small, dependency‑free pattern. It turns any `data-info` wrapped symbol into:
+- a CSS‑only tooltip on **hover/focus**
+- a small modal with richer content on **click**
+
+### Markup
+
+@math
+\htmlData{info}{Energy}{\class{var-e}{E}} = \htmlData{info}{mass}{\class{var-m}{m}}\,\class{var-c}{c}^{2}
+@end
+
+### Styles (tooltip + modal)
+
+@style(class="katex-interact-css")
+/* Hover/focus tooltip using the title-like attribute proxy */
+.kx-tip { position: relative; cursor: help; }
+.kx-tip:focus { outline: 2px solid #94a3b8; outline-offset: 2px; }
+.kx-tip[data-info]:hover::after,
+.kx-tip[data-info]:focus::after {
+  content: attr(data-info);
+  position: absolute;
+  left: 0; top: 100%;
+  white-space: nowrap;
+  background: #111; color: #fff;
+  padding: 2px 6px; border-radius: 4px;
+  transform: translateY(4px);
+  font-size: 12px; z-index: 10;
+}
+
+/* Minimal modal */
+.kx-modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,.45);
+  display: none; align-items: center; justify-content: center; z-index: 50;
+}
+.kx-modal-backdrop[data-open="true"] { display: flex; }
+.kx-modal {
+  width: min(92vw, 520px); background: #fff; color: #111;
+  border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.35);
+  padding: 16px 18px; font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+}
+.kx-modal h3 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+.kx-modal .close { float: right; cursor: pointer; font-size: 18px; line-height: 1; }
+@end
+
+### Behavior
+
+@script
+(function(){
+  // 1) Turn KaTeX spans with data-info into focusable, tooltip-enabled targets
+  document.querySelectorAll('.katex [data-info]').forEach(function(el){
+    el.classList.add('kx-tip');
+    el.tabIndex = 0;
+  });
+
+  // 2) Create one modal for the page
+  var backdrop = document.createElement('div');
+  backdrop.className = 'kx-modal-backdrop';
+  backdrop.innerHTML =
+    '<div class="kx-modal" role="dialog" aria-modal="true" aria-labelledby="kx-modal-title">' +
+      '<span class="close" aria-label="Close">×</span>' +
+      '<h3 id="kx-modal-title">Definition</h3>' +
+      '<div class="kx-modal-body"></div>' +
+    '</div>';
+  document.body.appendChild(backdrop);
+
+  var close = function(){ backdrop.setAttribute('data-open','false'); };
+  backdrop.addEventListener('click', function(ev){
+    // click outside closes
+    if (ev.target === backdrop) close();
+  });
+  backdrop.querySelector('.close').addEventListener('click', close);
+  document.addEventListener('keydown', function(ev){
+    if (ev.key === 'Escape') close();
+  });
+
+  // 3) Click handler: open modal with richer info
+  document.addEventListener('click', function(ev){
+    var el = ev.target.closest('.kx-tip[data-info]');
+    if (!el) return;
+
+    var key = el.getAttribute('data-info'); // e.g. "Energy", "mass"
+    var html = '';
+    if (key === 'Energy') {
+      html = '<p><strong>E</strong> denotes <em>Energy</em>. In special relativity, E = mc² relates mass and energy.</p>' +
+             '<p><small>Units: joules (J)</small></p>';
+    } else if (key === 'mass') {
+      html = '<p><strong>m</strong> denotes <em>mass</em>. It measures the amount of matter in a body.</p>' +
+             '<p><small>Units: kilograms (kg)</small></p>';
+    } else if (key === 'c') {
+      html = '<p><strong>c</strong> is the <em>speed of light</em>, approximately 299,792,458 m/s.</p>' +
+             '<p><small>Squared in E = mc² to reflect its role in energy equivalence.</small></p>';
+    } else {
+      html = '<p>'+key+'</p>';
+    }
+
+    backdrop.querySelector('.kx-modal-body').innerHTML = html;
+    backdrop.setAttribute('data-open','true');
+  });
+})();
+@end
+
+> **Note:** this example uses very small, local behavior for clarity.
+> For real projects, prefer extracting such modal/tooltip code into a reusable component or plugin.
+
+## 10.5 Working with macros
+
+Define macros inside a math block or via a document‑level macro directive (future). Inline definition example:
+
+@math
+\def\RR{\mathbb{R}}
+\def\vec#1{\boldsymbol{#1}}
+\vec{v} \in \RR^n
+@end
+
+## 10.6 Troubleshooting
+
+- If the helpers `\class`, `\htmlStyle`, or `\htmlData` don’t take effect, ensure Docz’s KaTeX boot is enabled
+  and configured with a **restrictive trust list** that includes those commands.
+- If you see raw TeX in the HTML, confirm the delimiters match the Docz config (see below).
+
+## 10.7 Docz KaTeX boot (reference)
+
+Docz injects KaTeX with a safe trust list. If you maintain a custom build or preview, ensure your initialization code
+looks like this (pseudocode of what Docz ships with):
+
+@code(lang="js")
+renderMathInElement(document.body, {
+  delimiters: [
+    {left: "$$", right: "$$", display: true},
+    {left: "$",  right: "$",  display: false},
+    {left: "\\(", right: "\\)", display: false},
+    {left: "\\[", right: "\\]", display: true}
+  ],
+  throwOnError: false,
+  trust: function (ctx) {
+    var cmd = ctx.command;
+    return cmd === "\\class"     || // alias of \htmlClass (Docz macro)
+           cmd === "\\htmlClass" ||
+           cmd === "\\htmlStyle" ||
+           cmd === "\\htmlData"  ||
+           cmd === "\\color"     ||
+           cmd === "\\textcolor" ||
+           cmd === "\\underline" ||
+           cmd === "\\boldsymbol"||
+           cmd === "\\boxed";
+  },
+  macros: {
+    "\\class": "\\htmlClass"
+  }
+});
+@end
+
+## 10.8 Complete worked example
+
+@style(class="prose")
+### Styling and interacting with \( E = mc^2 \)
+@end
+
+@style(class="flow")
+- Hover over **E** or **m** to see a tooltip.
+- Click either to open a small modal with more info.
+@end
+
+@math
+\htmlData{info}{Energy}{\class{var-e}{E}} =
+\htmlData{info}{mass}{\class{var-m}{m}}\,
+\htmlData{info}{c}{\class{var-c}{c}}^{2}
+@end
+
+@style(class="katex-demo-css")
+.var-e { color:#eab308; text-decoration: underline; text-decoration-thickness: 2px; }
+.var-m { color:#22c55e; }
+.var-c { color:#60a5fa; }
+.katex-display { margin: 0.6rem 0 1rem; }
+@end
+
+@style(class="footnote")
+_This demo uses only KaTeX + minimal CSS and a tiny script — no frameworks required._
+@end

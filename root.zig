@@ -1,44 +1,58 @@
 // "public API surface" (internal stuff is instead hooked up via `build.zig`)
 const std = @import("std");
 
-// ── Public modules
+// ── Parsers / AST -----------------------------------------------------------
 pub const Tokenizer = @import("src/parser/tokenizer.zig");
 pub const Parser = @import("src/parser/parser.zig");
 pub const AST = @import("src/parser/ast.zig");
+
+// Import the dedicated HTML exporter module (wired up in build.zig).
+// NOTE: build.zig must have: docz_module.addImport("html_export", html_export_mod);
+const html_export = @import("html_export");
+
+// ── Renderer facade (what tests/CLI import) ---------------------------------
+// - renderer.inline.renderInline(...)   → inline transformer for paragraph text
+// - renderer.html.exportHtml(...)       → full document HTML exporter
+//   (aliases: renderer.html.renderHTML / renderer.html.render)
+pub const renderer = struct {
+    pub const inline_ = struct {
+        pub const renderInline =
+            @import("src/convert/inline/renderer.zig").renderInline;
+    };
+
+    pub const html = struct {
+        pub const exportHtml = html_export.exportHtml;
+
+        // Convenience aliases expected by some callers/tests
+        pub const render = exportHtml;
+        pub const renderHTML = exportHtml;
+    };
+};
+
+// ── Canonical top-level symbols (back-compat) --------------------------------
+// Some older call sites use these names directly.
 pub const Renderer = @import("src/renderer/html.zig");
+pub const InlineRenderer = @import("src/convert/inline/renderer.zig");
 
-// NOTE: DO NOT import src/main.zig here (avoids module ownership conflict)
-
-// ── Embedded assets (paths are relative to repo root)
+// ── Embedded assets (paths are relative to repo root) -----------------------
 pub const assets = struct {
     /// Baseline stylesheet for out-of-the-box, clean defaults.
     pub const core_css: []const u8 = @embedFile("assets/css/docz.core.css");
 };
 
-// ── Plugin system
+// ── Plugin system ------------------------------------------------------------
 const plugin_mod = @import("src/plugins/manager.zig");
 pub const PluginManager = plugin_mod.PluginManager;
 pub const Plugin = plugin_mod.Plugin;
 
-// ── Web preview
-const web_preview_server = @import("web-preview/server.zig");
-const web_preview_hot_reload = @import("web-preview/hot_reload.zig");
-pub const web_preview = struct {
-    pub const server = web_preview_server;
-    pub const hot = web_preview_hot_reload;
-};
-
-// ── Namespaces for clarity
+// ── Namespaces for clarity (ergonomic re-exports) ---------------------------
 pub const parser = struct {
     pub const tokenizer = Tokenizer;
     pub const parser = Parser;
     pub const ast = AST;
 };
-pub const renderer = struct {
-    pub const html = Renderer;
-};
 
-// ── Minimal shim for tests that read docz.main.USAGE_TEXT
+// ── Minimal shim for tests that read docz.main.USAGE_TEXT -------------------
 pub const main = struct {
     pub const USAGE_TEXT =
         \\Docz CLI Usage:
@@ -49,11 +63,7 @@ pub const main = struct {
     ;
 };
 
+// Keep tests tiny; no cross-module imports from here to avoid cycles.
 test {
     std.testing.refAllDecls(@This());
-    comptime {
-        _ = web_preview.server.PreviewServer;
-        _ = web_preview.hot.Broadcaster;
-        _ = web_preview.hot.Sink;
-    }
 }

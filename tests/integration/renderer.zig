@@ -1,5 +1,6 @@
 const std = @import("std");
 const docz = @import("docz");
+const html_export = @import("html_export");
 
 pub const _force_test_discovery = true;
 
@@ -16,23 +17,15 @@ test "integration: renderer produces HTML from simple AST" {
     defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
 
-    // Tokenize
     const tokens = try docz.Tokenizer.tokenize(input, allocator);
-    // IMPORTANT: since we'll parse, the AST owns any lexeme strings.
-    // Only free the *slice* here (no Tokenizer.freeTokens).
     defer allocator.free(tokens);
 
-    // Parse → AST takes ownership of token lexemes
     var ast = try docz.Parser.parse(tokens, allocator);
-    defer ast.deinit();
+    defer ast.deinit(allocator);
 
-    // Render
-    const html = try docz.Renderer.renderHTML(&ast, allocator);
+    const html = try html_export.exportHtml(&ast, allocator);
     defer allocator.free(html);
 
-    // std.debug.print("🖨️  Rendered HTML:\n{s}\n", .{html});
-
-    // Assertions
     try std.testing.expect(std.mem.containsAtLeast(u8, html, 1, "<h3>Render Test</h3>"));
     try std.testing.expect(std.mem.containsAtLeast(u8, html, 1, "const x = 9;"));
 }

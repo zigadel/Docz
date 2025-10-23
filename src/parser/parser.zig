@@ -58,31 +58,31 @@ pub fn parse(tokens: []const Token, allocator: std.mem.Allocator) !ASTNode {
 
             // block body for fenced directives
             if (isBlockDirective(node_type)) {
-                var block = std.ArrayList(u8).init(allocator);
-                defer block.deinit();
+                var block = std.ArrayList(u8){};
+                defer block.deinit(allocator);
 
                 while (i < tokens.len and tokens[i].kind != .BlockEnd) : (i += 1) {
-                    try block.appendSlice(tokens[i].lexeme);
-                    try block.append('\n');
+                    try block.appendSlice(allocator, tokens[i].lexeme);
+                    try block.append(allocator, '\n');
                 }
                 if (i < tokens.len and tokens[i].kind == .BlockEnd) {
                     i += 1; // skip @end
                 }
 
                 if (block.items.len > 0) {
-                    node.content = try block.toOwnedSlice();
+                    node.content = try block.toOwnedSlice(allocator);
                     node.owns_content = true; // we allocated it
                 }
             }
 
-            try root.children.append(node);
+            try root.children.append(allocator, node);
             continue;
         }
 
         if (tok.kind == .Content) {
             var content_node = ASTNode.init(allocator, .Content);
             content_node.content = tok.lexeme; // not owned
-            try root.children.append(content_node);
+            try root.children.append(allocator, content_node);
             i += 1;
             continue;
         }
@@ -113,7 +113,7 @@ test "Parse multiple directives" {
     defer allocator.free(tokens);
 
     var ast = try parse(tokens, allocator);
-    defer ast.deinit();
+    defer ast.deinit(allocator);
 
     try std.testing.expectEqual(ast.children.items.len, 3);
     try std.testing.expectEqual(ast.children.items[0].node_type, .Meta);

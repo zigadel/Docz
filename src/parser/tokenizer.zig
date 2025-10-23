@@ -36,8 +36,10 @@ pub fn tokenize(input: []const u8, allocator: std.mem.Allocator) ![]Token {
 
 /// Extended API (kept internal for now) that accepts options.
 pub fn tokenizeWith(input: []const u8, allocator: std.mem.Allocator, config: TokenizerConfig) ![]Token {
-    var tokens = std.ArrayList(Token).init(allocator);
-    errdefer tokens.deinit();
+    const A = allocator;
+
+    var tokens = std.ArrayList(Token){};
+    errdefer tokens.deinit(A);
 
     var i: usize = 0;
 
@@ -92,9 +94,9 @@ pub fn tokenizeWith(input: []const u8, allocator: std.mem.Allocator, config: Tok
                 // Case 1: whole trimmed line is "@end"
                 if (trimmedEq(line, "@end")) {
                     if (content_start < i) {
-                        try tokens.append(.{ .kind = .Content, .lexeme = input[content_start..i] });
+                        try tokens.append(A, .{ .kind = .Content, .lexeme = input[content_start..i] });
                     }
-                    try tokens.append(.{ .kind = .BlockEnd, .lexeme = "@end" });
+                    try tokens.append(A, .{ .kind = .BlockEnd, .lexeme = "@end" });
                     i = if (eol < input.len and input[eol] == '\n') eol + 1 else eol;
                     fence_name = "";
                     break;
@@ -111,9 +113,9 @@ pub fn tokenizeWith(input: []const u8, allocator: std.mem.Allocator, config: Tok
                         }
 
                         if (content_start < cut_abs) {
-                            try tokens.append(.{ .kind = .Content, .lexeme = input[content_start..cut_abs] });
+                            try tokens.append(A, .{ .kind = .Content, .lexeme = input[content_start..cut_abs] });
                         }
-                        try tokens.append(.{ .kind = .BlockEnd, .lexeme = "@end" });
+                        try tokens.append(A, .{ .kind = .BlockEnd, .lexeme = "@end" });
                         // consume the rest of this line including newline
                         i = if (eol < input.len and input[eol] == '\n') eol + 1 else eol;
                         fence_name = "";
@@ -127,7 +129,7 @@ pub fn tokenizeWith(input: []const u8, allocator: std.mem.Allocator, config: Tok
 
             // EOF with no @end: emit remainder and exit fence
             if (fence_name.len != 0 and content_start < input.len) {
-                try tokens.append(.{ .kind = .Content, .lexeme = input[content_start..input.len] });
+                try tokens.append(A, .{ .kind = .Content, .lexeme = input[content_start..input.len] });
                 fence_name = "";
                 i = input.len;
             }
@@ -143,8 +145,8 @@ pub fn tokenizeWith(input: []const u8, allocator: std.mem.Allocator, config: Tok
             while (i < input.len and !std.ascii.isWhitespace(input[i])) : (i += 1) {}
             const word = input[start..i];
 
-            const combined = try std.fmt.allocPrint(allocator, "@{s}", .{word});
-            try tokens.append(.{
+            const combined = try std.fmt.allocPrint(A, "@{s}", .{word});
+            try tokens.append(A, .{
                 .kind = .Content,
                 .lexeme = combined,
                 .is_allocated = true,
@@ -156,7 +158,7 @@ pub fn tokenizeWith(input: []const u8, allocator: std.mem.Allocator, config: Tok
         if (c == '@' and i + 4 <= input.len and std.mem.eql(u8, input[i .. i + 4], "@end")) {
             const eol = lineEnd(input, i);
             if (trimmedEq(input[i..eol], "@end")) {
-                try tokens.append(.{ .kind = .BlockEnd, .lexeme = "@end" });
+                try tokens.append(A, .{ .kind = .BlockEnd, .lexeme = "@end" });
                 i = if (eol < input.len and input[eol] == '\n') eol + 1 else eol;
                 continue;
             }
@@ -181,11 +183,11 @@ pub fn tokenizeWith(input: []const u8, allocator: std.mem.Allocator, config: Tok
                 const directive_full = input[d_start..i]; // e.g. "@meta", "@style-def"
 
                 if (directive_full.len == 1) {
-                    try tokens.append(.{ .kind = .Content, .lexeme = "@" });
+                    try tokens.append(A, .{ .kind = .Content, .lexeme = "@" });
                     continue;
                 }
 
-                try tokens.append(.{ .kind = .Directive, .lexeme = directive_full });
+                try tokens.append(A, .{ .kind = .Directive, .lexeme = directive_full });
 
                 // Optional parameter list: (...)
                 if (i < input.len and input[i] == '(') {
@@ -220,7 +222,7 @@ pub fn tokenizeWith(input: []const u8, allocator: std.mem.Allocator, config: Tok
                             if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-')) break;
                         }
                         if (i > key_start) {
-                            try tokens.append(.{ .kind = .ParameterKey, .lexeme = input[key_start..i] });
+                            try tokens.append(A, .{ .kind = .ParameterKey, .lexeme = input[key_start..i] });
                         } else {
                             // skip one char to avoid infinite loop if malformed
                             if (i < input.len and input[i] != ')' and input[i] != ',') i += 1;
@@ -238,7 +240,7 @@ pub fn tokenizeWith(input: []const u8, allocator: std.mem.Allocator, config: Tok
                                     if (input[i] == '"') break;
                                 }
                                 const str_end = if (i < input.len) i else input.len;
-                                try tokens.append(.{ .kind = .ParameterValue, .lexeme = input[str_start..str_end] });
+                                try tokens.append(A, .{ .kind = .ParameterValue, .lexeme = input[str_start..str_end] });
                                 if (i < input.len and input[i] == '"') i += 1;
                             } else {
                                 const v_start = i;
@@ -247,7 +249,7 @@ pub fn tokenizeWith(input: []const u8, allocator: std.mem.Allocator, config: Tok
                                     if (std.ascii.isWhitespace(ch) or ch == ')' or ch == ',') break;
                                 }
                                 if (i > v_start) {
-                                    try tokens.append(.{ .kind = .ParameterValue, .lexeme = input[v_start..i] });
+                                    try tokens.append(A, .{ .kind = .ParameterValue, .lexeme = input[v_start..i] });
                                 }
                             }
                         }
@@ -298,12 +300,12 @@ pub fn tokenizeWith(input: []const u8, allocator: std.mem.Allocator, config: Tok
             }
         }
         if (i > content_start) {
-            try tokens.append(.{ .kind = .Content, .lexeme = input[content_start..i] });
+            try tokens.append(A, .{ .kind = .Content, .lexeme = input[content_start..i] });
         }
         // newline (if any) handled next iteration
     }
 
-    return tokens.toOwnedSlice();
+    return try tokens.toOwnedSlice(A);
 }
 
 /// Free all heap allocations in token list.
@@ -318,7 +320,7 @@ pub fn freeTokens(allocator: std.mem.Allocator, tokens: []Token) void {
 /// Return index of end-of-line (position of '\n' or input.len).
 fn lineEnd(input: []const u8, pos: usize) usize {
     var j = pos;
-    while (j < input.len and j < input.len and input[j] != '\n') : (j += 1) {}
+    while (j < input.len and input[j] != '\n') : (j += 1) {}
     return j;
 }
 

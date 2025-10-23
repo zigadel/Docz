@@ -10,9 +10,8 @@ fn errW() std.fs.File.Writer {
 
 // ---------- file helpers ----------
 pub fn readFileAlloc(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
-    var f = try std.fs.cwd().openFile(path, .{});
-    defer f.close();
-    return try f.readToEndAlloc(alloc, 1 << 26);
+    // Zig 0.16: Dir.readFileAlloc(path, allocator, Io.Limit)
+    return std.fs.cwd().readFileAlloc(path, alloc, @enumFromInt(1 << 26));
 }
 
 pub fn writeFile(path: []const u8, data: []const u8) !void {
@@ -73,13 +72,11 @@ pub fn loadSettings(alloc: std.mem.Allocator, path_opt: ?[]const u8) !Settings {
     var s: Settings = .{};
     const path = path_opt orelse "docz.settings.json";
 
-    var f = std.fs.cwd().openFile(path, .{}) catch |e| {
+    // Read whole file in one go using Dir.readFileAlloc; tolerate missing file.
+    const data = std.fs.cwd().readFileAlloc(path, alloc, @enumFromInt(1 << 16)) catch |e| {
         if (e == error.FileNotFound) return s; // defaults if missing
         return e;
     };
-    defer f.close();
-
-    const data = try f.readToEndAlloc(alloc, 1 << 16);
     defer alloc.free(data);
 
     // Strings

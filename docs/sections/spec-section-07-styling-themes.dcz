@@ -1,0 +1,131 @@
+@meta(title="Docz Spec — Section 7", section="7", name="Styling & Themes")
+
+# 7. Styling & Themes
+
+Docz outputs **standard HTML** and ships with sensible, readable defaults. From there you can style documents in three layers:
+
+1) **Core CSS** — `docz.core.css` is always linked first.  
+2) **Your CSS** — via `@css ... @end` or a user stylesheet.  
+3) **Theme CSS (optional)** — Tailwind theme, if present, is linked last among stylesheets so utilities can layer on top of the core.
+
+> In short: **you can use plain CSS _or_ Tailwind utilities**. Docz does not require Tailwind, but will use it when discovered.
+
+## 7.1 Core CSS
+
+`docz.core.css` establishes a clean, readable baseline (typography, spacing, code block defaults, etc.).  
+It’s injected automatically by the CLI and requires no configuration.
+
+Example (no action required, shown for clarity):
+
+@code(lang="text")
+<link rel="stylesheet" href="docz.core.css">
+@end
+
+## 7.2 Your Global CSS with `@css`
+
+Use `@css ... @end` anywhere in the document to add global CSS rules.  
+These are emitted into the page `<head>` in document order.
+
+@css()
+/* A light callout style */
+.callout {
+  padding: .75rem 1rem;
+  border-left: 4px solid #60a5fa; /* blue-400 */
+  background: #f0f9ff;
+}
+
+/* A helper for subtle glow on hover */
+.hover-glow:hover {
+  box-shadow: 0 0 .5rem rgba(255, 255, 0, .6);
+}
+@end
+
+You can define as many `@css` blocks as you like; they are concatenated in order.
+
+## 7.3 Inline Styling with `@style` (explicit)
+
+Use `@style` to wrap content with a `span` (inline) or `div` (block) that carries attributes you provide.
+
+- `class="..."` — class list (works with plain CSS classes or Tailwind utilities)
+- `style="..."` — inline CSS style string
+- `id="..."`, `data-*="..."` — passed through
+- `on-...="..."` — interaction hooks (see §8)
+
+### Inline example (explicit)
+
+The mass term is @style(class="underline text-blue-700") m @end in $E = mc^2$.
+
+### Block example (explicit)
+
+@style(class="callout")
+This text uses the `.callout` class defined above.
+It spans multiple lines.
+@end
+
+> **Tip:** prefer `class="..."` when using utilities or named classes, and `style="..."` for quick one‑offs.
+
+## 7.4 Styling Shorthand `@(...) { ... }`
+
+For concise in‑line styling, you can use the shorthand form:
+
+- One‑line inline: `@(<attrs>){<text>}`
+- Multi‑line: `@(<attrs>)` on its own line, then content, then `@end`
+
+### One‑liner
+
+@(class="text-green-600 font-semibold"){Limes are green}
+
+### Multi‑line
+
+@(class="callout hover-glow")
+Hover me to see a subtle glow.
+@end
+
+Shorthand is **exactly equivalent** to the explicit `@style(...) ... @end` form.
+
+## 7.5 Tailwind Mode (optional)
+
+If a Tailwind theme is discovered (vendored or monorepo build), Docz links `docz.tailwind.css` _after_ `docz.core.css`.  
+When present, you can use any Tailwind utility in `class="..."` without additional setup.
+
+Examples (work when Tailwind is available; otherwise they are harmless no‑ops):
+
+- `@(class="prose prose-zinc") { Paragraphs render with readable typography }`
+- `@(class="text-sm md:text-base lg:text-lg"){Responsive text}`
+- `@(class="bg-amber-50 border-l-4 border-amber-400 p-3 rounded"){Warning banner}`
+
+> **Degrades gracefully:** if Tailwind is missing, unknown classes are simply ignored by the browser. Your document remains readable thanks to the core CSS.
+
+## 7.6 Ordering & Specificity
+
+Docz links styles in this order:
+
+1. `docz.core.css`
+2. Your user stylesheet (when `--css file` is used)
+3. `docz.tailwind.css` (if discovered)
+4. Inline `<style>` from `@css` blocks (in document order)
+
+This ensures utilities and your custom rules can override baseline defaults when needed.
+
+## 7.7 Data Attributes & IDs
+
+`@style` transparently passes through `id="..."` and any `data-*="..."`. Use these for scripted behavior or targeted CSS.
+
+Example:
+
+@css()
+/* emphasize any element marked as data-important */
+[data-important="true"] { outline: 2px dashed #f59e0b; /* amber-500 */ }
+@end
+
+@(class="p-2 rounded" id="energy-definition" data-important="true"){Energy (E) is the capacity to do work.}
+
+## 7.8 Accessibility Notes
+
+- Prefer semantic HTML where possible (use headings, lists, and tables appropriately).  
+- When using `@style` to simulate UI controls, ensure keyboard focus styles are visible and add ARIA roles if needed.  
+- Keep color contrast high; utilities like `text-zinc-800` on `bg-white` are a safe baseline.
+
+---
+
+**Recap:** Start with the built‑in core CSS, add your own `@css` rules, and (optionally) lean on Tailwind utilities via `class="..."`. Use `@style` (or `@(...)` shorthand) to apply styles inline or in blocks without losing readability.

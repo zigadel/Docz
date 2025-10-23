@@ -3,29 +3,29 @@ const std = @import("std");
 // ─────────────────────────────────────────────────────────────
 // Tiny HTML escaper
 // ─────────────────────────────────────────────────────────────
-fn htmlAppendEscChar(out: *std.ArrayList(u8), ch: u8) !void {
+fn htmlAppendEscChar(out: *std.ArrayList(u8), alloc: std.mem.Allocator, ch: u8) !void {
     switch (ch) {
-        '&' => try out.appendSlice("&amp;"),
-        '<' => try out.appendSlice("&lt;"),
-        '>' => try out.appendSlice("&gt;"),
-        '"' => try out.appendSlice("&quot;"),
-        '\'' => try out.appendSlice("&#39;"),
-        else => try out.append(ch),
+        '&' => try out.appendSlice(alloc, "&amp;"),
+        '<' => try out.appendSlice(alloc, "&lt;"),
+        '>' => try out.appendSlice(alloc, "&gt;"),
+        '"' => try out.appendSlice(alloc, "&quot;"),
+        '\'' => try out.appendSlice(alloc, "&#39;"),
+        else => try out.append(alloc, ch),
     }
 }
 
 fn htmlEscape(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).init(alloc);
-    errdefer out.deinit();
-    for (s) |ch| try htmlAppendEscChar(&out, ch);
-    return out.toOwnedSlice();
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(alloc);
+    for (s) |ch| try htmlAppendEscChar(&out, alloc, ch);
+    return out.toOwnedSlice(alloc);
 }
 
-fn flushParagraph(p: *std.ArrayList(u8), out: *std.ArrayList(u8)) !void {
+fn flushParagraph(p: *std.ArrayList(u8), out: *std.ArrayList(u8), alloc: std.mem.Allocator) !void {
     if (p.items.len == 0) return;
-    try out.appendSlice("<p>");
-    try out.appendSlice(p.items);
-    try out.appendSlice("</p>\n");
+    try out.appendSlice(alloc, "<p>");
+    try out.appendSlice(alloc, p.items);
+    try out.appendSlice(alloc, "</p>\n");
     p.clearRetainingCapacity();
 }
 
@@ -33,8 +33,8 @@ fn flushParagraph(p: *std.ArrayList(u8), out: *std.ArrayList(u8)) !void {
 // Inline formatter: **bold**, *italic*, `code`, [text](url)
 // ─────────────────────────────────────────────────────────────
 fn inlineFormat(alloc: std.mem.Allocator, line: []const u8) ![]u8 {
-    var out = std.ArrayList(u8).init(alloc);
-    errdefer out.deinit();
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(alloc);
 
     var i: usize = 0;
     var em_on = false;
@@ -46,7 +46,10 @@ fn inlineFormat(alloc: std.mem.Allocator, line: []const u8) ![]u8 {
 
         // Toggle inline code: `code`
         if (c == '`') {
-            if (code_on) try out.appendSlice("</code>") else try out.appendSlice("<code>");
+            if (code_on)
+                try out.appendSlice(alloc, "</code>")
+            else
+                try out.appendSlice(alloc, "<code>");
             code_on = !code_on;
             i += 1;
             continue;
@@ -56,13 +59,13 @@ fn inlineFormat(alloc: std.mem.Allocator, line: []const u8) ![]u8 {
             // Markdown link: [text](url)
             if (c == '[') {
                 const close_br = std.mem.indexOfScalarPos(u8, line, i + 1, ']') orelse {
-                    try htmlAppendEscChar(&out, c);
+                    try htmlAppendEscChar(&out, alloc, c);
                     i += 1;
                     continue;
                 };
                 if (close_br + 1 < line.len and line[close_br + 1] == '(') {
                     const close_par = std.mem.indexOfScalarPos(u8, line, close_br + 2, ')') orelse {
-                        try htmlAppendEscChar(&out, c);
+                        try htmlAppendEscChar(&out, alloc, c);
                         i += 1;
                         continue;
                     };
@@ -74,11 +77,11 @@ fn inlineFormat(alloc: std.mem.Allocator, line: []const u8) ![]u8 {
                     const url_esc = try htmlEscape(alloc, url_raw);
                     defer alloc.free(url_esc);
 
-                    try out.appendSlice("<a href=\"");
-                    try out.appendSlice(url_esc);
-                    try out.appendSlice("\">");
-                    try out.appendSlice(text_esc);
-                    try out.appendSlice("</a>");
+                    try out.appendSlice(alloc, "<a href=\"");
+                    try out.appendSlice(alloc, url_esc);
+                    try out.appendSlice(alloc, "\">");
+                    try out.appendSlice(alloc, text_esc);
+                    try out.appendSlice(alloc, "</a>");
 
                     i = close_par + 1;
                     continue;
@@ -87,7 +90,10 @@ fn inlineFormat(alloc: std.mem.Allocator, line: []const u8) ![]u8 {
 
             // Strong: **...**
             if (i + 1 < line.len and line[i] == '*' and line[i + 1] == '*') {
-                if (strong_on) try out.appendSlice("</strong>") else try out.appendSlice("<strong>");
+                if (strong_on)
+                    try out.appendSlice(alloc, "</strong>")
+                else
+                    try out.appendSlice(alloc, "<strong>");
                 strong_on = !strong_on;
                 i += 2;
                 continue;
@@ -95,7 +101,10 @@ fn inlineFormat(alloc: std.mem.Allocator, line: []const u8) ![]u8 {
 
             // Emphasis: *...*
             if (line[i] == '*') {
-                if (em_on) try out.appendSlice("</em>") else try out.appendSlice("<em>");
+                if (em_on)
+                    try out.appendSlice(alloc, "</em>")
+                else
+                    try out.appendSlice(alloc, "<em>");
                 em_on = !em_on;
                 i += 1;
                 continue;
@@ -103,16 +112,16 @@ fn inlineFormat(alloc: std.mem.Allocator, line: []const u8) ![]u8 {
         }
 
         // Plain character (escaped)
-        try htmlAppendEscChar(&out, c);
+        try htmlAppendEscChar(&out, alloc, c);
         i += 1;
     }
 
     // Close any unclosed tags (best-effort)
-    if (strong_on) try out.appendSlice("</strong>");
-    if (em_on) try out.appendSlice("</em>");
-    if (code_on) try out.appendSlice("</code>");
+    if (strong_on) try out.appendSlice(alloc, "</strong>");
+    if (em_on) try out.appendSlice(alloc, "</em>");
+    if (code_on) try out.appendSlice(alloc, "</code>");
 
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(alloc);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -120,8 +129,8 @@ fn inlineFormat(alloc: std.mem.Allocator, line: []const u8) ![]u8 {
 // Extracts @meta(title:"...") to fill <title>
 // ─────────────────────────────────────────────────────────────
 pub fn render(alloc: std.mem.Allocator, dcz: []const u8) ![]u8 {
-    var body = std.ArrayList(u8).init(alloc);
-    errdefer body.deinit();
+    var body = std.ArrayList(u8){};
+    errdefer body.deinit(alloc);
 
     var in_style = false;
 
@@ -129,16 +138,16 @@ pub fn render(alloc: std.mem.Allocator, dcz: []const u8) ![]u8 {
     var code_lang: []const u8 = "text";
 
     var in_math = false;
-    var math_buf = std.ArrayList(u8).init(alloc);
-    defer math_buf.deinit();
+    var math_buf = std.ArrayList(u8){};
+    defer math_buf.deinit(alloc);
 
-    var para = std.ArrayList(u8).init(alloc);
-    defer para.deinit();
+    var para = std.ArrayList(u8){};
+    defer para.deinit(alloc);
 
     // (optional) title from @meta(title:"...")
-    var title_buf = std.ArrayList(u8).init(alloc);
-    defer title_buf.deinit();
-    try title_buf.appendSlice("Docz Preview");
+    var title_buf = std.ArrayList(u8){};
+    defer title_buf.deinit(alloc);
+    try title_buf.appendSlice(alloc, "Docz Preview");
 
     var it = std.mem.splitScalar(u8, dcz, '\n');
     while (it.next()) |raw_line| {
@@ -152,7 +161,7 @@ pub fn render(alloc: std.mem.Allocator, dcz: []const u8) ![]u8 {
             }
 
             if (in_code) {
-                try body.appendSlice("</code></pre>\n");
+                try body.appendSlice(alloc, "</code></pre>\n");
                 in_code = false;
                 continue;
             }
@@ -166,9 +175,9 @@ pub fn render(alloc: std.mem.Allocator, dcz: []const u8) ![]u8 {
                 const esc = try htmlEscape(alloc, mb[0..end]);
                 defer alloc.free(esc);
 
-                try body.appendSlice("<p>$$ ");
-                try body.appendSlice(esc);
-                try body.appendSlice(" $$</p>\n");
+                try body.appendSlice(alloc, "<p>$$ ");
+                try body.appendSlice(alloc, esc);
+                try body.appendSlice(alloc, " $$</p>\n");
 
                 math_buf.clearRetainingCapacity();
                 in_math = false;
@@ -182,28 +191,28 @@ pub fn render(alloc: std.mem.Allocator, dcz: []const u8) ![]u8 {
         if (in_code) {
             const esc = try htmlEscape(alloc, raw_line);
             defer alloc.free(esc);
-            try body.appendSlice(esc);
-            try body.append('\n');
+            try body.appendSlice(alloc, esc);
+            try body.append(alloc, '\n');
             continue;
         }
 
         if (in_math) {
             if (line.len != 0) {
-                if (math_buf.items.len != 0) try math_buf.append(' ');
-                try math_buf.appendSlice(line);
+                if (math_buf.items.len != 0) try math_buf.append(alloc, ' ');
+                try math_buf.appendSlice(alloc, line);
             }
             continue;
         }
 
         // Block starters
         if (std.mem.startsWith(u8, line, "@style")) {
-            try flushParagraph(&para, &body);
+            try flushParagraph(&para, &body, alloc);
             in_style = true;
             continue;
         }
 
         if (std.mem.startsWith(u8, line, "@meta")) {
-            try flushParagraph(&para, &body);
+            try flushParagraph(&para, &body, alloc);
             if (std.mem.indexOfScalar(u8, line, '(')) |lp| {
                 if (std.mem.indexOfScalarPos(u8, line, lp, ')')) |rp| {
                     const inside = line[lp + 1 .. rp];
@@ -213,7 +222,7 @@ pub fn render(alloc: std.mem.Allocator, dcz: []const u8) ![]u8 {
                             title_buf.clearRetainingCapacity();
                             const t_esc = try htmlEscape(alloc, inside[start..p1]);
                             defer alloc.free(t_esc);
-                            try title_buf.appendSlice(t_esc);
+                            try title_buf.appendSlice(alloc, t_esc);
                         }
                     }
                 }
@@ -222,7 +231,7 @@ pub fn render(alloc: std.mem.Allocator, dcz: []const u8) ![]u8 {
         }
 
         if (std.mem.startsWith(u8, line, "@code")) {
-            try flushParagraph(&para, &body);
+            try flushParagraph(&para, &body, alloc);
 
             code_lang = "text";
             if (std.mem.indexOfScalar(u8, line, '(')) |lp| {
@@ -238,69 +247,69 @@ pub fn render(alloc: std.mem.Allocator, dcz: []const u8) ![]u8 {
             }
             const lang_esc = try htmlEscape(alloc, code_lang);
             defer alloc.free(lang_esc);
-            try body.appendSlice("<pre><code class=\"language-");
-            try body.appendSlice(lang_esc);
-            try body.appendSlice("\">");
+            try body.appendSlice(alloc, "<pre><code class=\"language-");
+            try body.appendSlice(alloc, lang_esc);
+            try body.appendSlice(alloc, "\">");
             in_code = true;
             continue;
         }
 
         if (std.mem.startsWith(u8, line, "@math")) {
-            try flushParagraph(&para, &body);
+            try flushParagraph(&para, &body, alloc);
             in_math = true;
             continue;
         }
 
         // Blank line ⇒ paragraph break
         if (line.len == 0) {
-            try flushParagraph(&para, &body);
+            try flushParagraph(&para, &body, alloc);
             continue;
         }
 
         // Headings
         if (std.mem.startsWith(u8, line, "### ")) {
-            try flushParagraph(&para, &body);
+            try flushParagraph(&para, &body, alloc);
             const h = try inlineFormat(alloc, line[4..]);
             defer alloc.free(h);
-            try body.appendSlice("<h3>");
-            try body.appendSlice(h);
-            try body.appendSlice("</h3>\n");
+            try body.appendSlice(alloc, "<h3>");
+            try body.appendSlice(alloc, h);
+            try body.appendSlice(alloc, "</h3>\n");
             continue;
         }
         if (std.mem.startsWith(u8, line, "## ")) {
-            try flushParagraph(&para, &body);
+            try flushParagraph(&para, &body, alloc);
             const h = try inlineFormat(alloc, line[3..]);
             defer alloc.free(h);
-            try body.appendSlice("<h2>");
-            try body.appendSlice(h);
-            try body.appendSlice("</h2>\n");
+            try body.appendSlice(alloc, "<h2>");
+            try body.appendSlice(alloc, h);
+            try body.appendSlice(alloc, "</h2>\n");
             continue;
         }
         if (std.mem.startsWith(u8, line, "# ")) {
-            try flushParagraph(&para, &body);
+            try flushParagraph(&para, &body, alloc);
             const h = try inlineFormat(alloc, line[2..]);
             defer alloc.free(h);
-            try body.appendSlice("<h1>");
-            try body.appendSlice(h);
-            try body.appendSlice("</h1>\n");
+            try body.appendSlice(alloc, "<h1>");
+            try body.appendSlice(alloc, h);
+            try body.appendSlice(alloc, "</h1>\n");
             continue;
         }
 
         // Normal line → part of current paragraph
         const frag = try inlineFormat(alloc, line);
         defer alloc.free(frag);
-        if (para.items.len != 0) try para.append(' ');
-        try para.appendSlice(frag);
+        if (para.items.len != 0) try para.append(alloc, ' ');
+        try para.appendSlice(alloc, frag);
     }
 
     // flush trailing paragraph
-    try flushParagraph(&para, &body);
+    try flushParagraph(&para, &body, alloc);
 
     // wrap document with computed title
-    var doc = std.ArrayList(u8).init(alloc);
-    errdefer doc.deinit();
+    var doc = std.ArrayList(u8){};
+    errdefer doc.deinit(alloc);
 
-    try doc.appendSlice(
+    try doc.appendSlice(alloc,
         \\<!DOCTYPE html>
         \\<html>
         \\  <head>
@@ -308,19 +317,19 @@ pub fn render(alloc: std.mem.Allocator, dcz: []const u8) ![]u8 {
         \\    <meta name="viewport" content="width=device-width, initial-scale=1" />
         \\    <title>
     );
-    try doc.appendSlice(title_buf.items);
-    try doc.appendSlice(
+    try doc.appendSlice(alloc, title_buf.items);
+    try doc.appendSlice(alloc,
         \\</title>
         \\  </head>
         \\  <body>
         \\
     );
-    try doc.appendSlice(body.items);
-    try doc.appendSlice(
+    try doc.appendSlice(alloc, body.items);
+    try doc.appendSlice(alloc,
         \\  </body>
         \\</html>
         \\
     );
 
-    return doc.toOwnedSlice();
+    return doc.toOwnedSlice(alloc);
 }

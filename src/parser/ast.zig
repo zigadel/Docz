@@ -30,35 +30,31 @@ pub const ASTNode = struct {
             .owns_content = false,
             .allocator = allocator,
             .attributes = std.StringHashMap([]const u8).init(allocator),
-            .children = std.ArrayList(ASTNode).init(allocator),
+            .children = std.ArrayList(ASTNode){},
         };
     }
 
-    pub fn deinit(self: *ASTNode) void {
+    pub fn deinit(self: *ASTNode, alloc: std.mem.Allocator) void {
         // children first
         var i: usize = 0;
         while (i < self.children.items.len) : (i += 1) {
-            self.children.items[i].deinit();
+            self.children.items[i].deinit(alloc);
         }
-        self.children.deinit();
+        self.children.deinit(alloc);
         self.attributes.deinit();
 
-        // free content if we own it
         if (self.owns_content and self.content.len > 0) {
             if (self.allocator) |a| a.free(self.content);
         }
-        // make dangling use obvious in debug
         self.content = "";
         self.owns_content = false;
     }
 
-    pub fn addChild(self: *ASTNode, child: ASTNode) !void {
-        try self.children.append(child);
+    pub fn addChild(self: *ASTNode, alloc: std.mem.Allocator, child: ASTNode) !void {
+        try self.children.append(alloc, child);
     }
 
-    /// Convenience: borrow a slice as content (caller keeps ownership).
     pub fn setContentBorrowed(self: *ASTNode, slice: []const u8) void {
-        // if we previously owned, free first
         if (self.owns_content and self.content.len > 0) {
             if (self.allocator) |a| a.free(self.content);
         }
@@ -66,9 +62,7 @@ pub const ASTNode = struct {
         self.owns_content = false;
     }
 
-    /// Convenience: copy a slice into node-owned memory.
     pub fn setContentOwned(self: *ASTNode, allocator: std.mem.Allocator, slice: []const u8) !void {
-        // if we previously owned, free first
         if (self.owns_content and self.content.len > 0) {
             if (self.allocator) |a| a.free(self.content);
         }
@@ -78,18 +72,15 @@ pub const ASTNode = struct {
         self.allocator = allocator;
     }
 
-    /// Add or overwrite an attribute.
     pub fn addAttr(self: *ASTNode, key: []const u8, value: []const u8) !void {
         try self.attributes.put(key, value);
     }
 
-    /// Get attribute by key.
     pub fn getAttr(self: *const ASTNode, key: []const u8) ?[]const u8 {
         if (self.attributes.get(key)) |v| return v;
         return null;
     }
 
-    /// Whether this node is a block-style node that consumes a body until @end.
     pub fn isBlockLike(self: *const ASTNode) bool {
         return switch (self.node_type) {
             .CodeBlock, .Math, .Style, .Css, .StyleDef => true,
@@ -97,7 +88,6 @@ pub const ASTNode = struct {
         };
     }
 
-    /// Whether this node contributes to <head> in HTML (helps exporter).
     pub fn isHeadAsset(self: *const ASTNode) bool {
         return switch (self.node_type) {
             .Import, .Css, .Meta => true,
@@ -105,38 +95,24 @@ pub const ASTNode = struct {
         };
     }
 
-    /// Deep clone onto a target allocator.
     pub fn cloneDeep(self: *const ASTNode, allocator: std.mem.Allocator) !ASTNode {
         var out = ASTNode.init(allocator, self.node_type);
-        // copy content (owned in clone)
         if (self.content.len > 0) {
             try out.setContentOwned(allocator, self.content);
         }
-        // copy attributes
         var it = self.attributes.iterator();
         while (it.next()) |entry| {
-            // values are borrowed by map here; store borrowed slices from original
-            // To make the clone independent, dupe both k and v.
             const k = try allocator.dupe(u8, entry.key_ptr.*);
             const v = try allocator.dupe(u8, entry.value_ptr.*);
             try out.attributes.put(k, v);
         }
-        // copy children
         for (self.children.items) |child| {
             const dup_child = try child.cloneDeep(allocator);
-            try out.children.append(dup_child);
+            try out.children.append(allocator, dup_child);
         }
         return out;
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // StyleDef utilities
-    // Parses StyleDef content lines of the form:
-    //   alias: class1 class2 class3
-    // Ignores empty/comment lines (starting with '#').
-    // Returns a map alias → class-string (owned by returned map).
-    // Caller owns and must deinit the returned map.
-    // ─────────────────────────────────────────────────────────────
     pub fn parseStyleAliases(self: *const ASTNode, allocator: std.mem.Allocator) !std.StringHashMap([]const u8) {
         var map = std.StringHashMap([]const u8).init(allocator);
         errdefer {
@@ -149,7 +125,7 @@ pub const ASTNode = struct {
         }
 
         if (self.node_type != .StyleDef or self.content.len == 0) {
-            return map; // empty
+            return map;
         }
 
         var it = std.mem.splitScalar(u8, self.content, '\n');
@@ -170,13 +146,10 @@ pub const ASTNode = struct {
 
             const gop = try map.getOrPut(alias_owned);
             if (gop.found_existing) {
-                // We won’t store alias_owned; free it.
                 allocator.free(alias_owned);
-                // Replace existing value, freeing the old one.
                 allocator.free(gop.value_ptr.*);
                 gop.value_ptr.* = classes_owned;
             } else {
-                // First time for this alias: store both key and value.
                 gop.key_ptr.* = alias_owned;
                 gop.value_ptr.* = classes_owned;
             }
@@ -192,15 +165,15 @@ pub const ASTNode = struct {
 test "ASTNode init and deinit with attributes and children" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(gpa.deinit() == .ok);
-    const allocator = gpa.allocator();
+    const A = gpa.allocator();
 
-    var root = ASTNode.init(allocator, .Document);
-    defer root.deinit();
+    var root = ASTNode.init(A, .Document);
+    defer root.deinit(A);
 
-    var heading = ASTNode.init(allocator, .Heading);
+    var heading = ASTNode.init(A, .Heading);
     heading.content = "Docz Title";
     try heading.attributes.put("level", "2");
-    try root.addChild(heading);
+    try root.addChild(A, heading);
 
     try std.testing.expect(root.children.items.len == 1);
     try std.testing.expect(std.mem.eql(u8, root.children.items[0].content, "Docz Title"));
@@ -213,7 +186,7 @@ test "Css node isBlockLike and head asset" {
     const A = gpa.allocator();
 
     var css = ASTNode.init(A, .Css);
-    defer css.deinit();
+    defer css.deinit(A);
     try css.setContentOwned(A,
         \\.card { border: 1px solid #ccc; }
     );
@@ -230,7 +203,7 @@ test "StyleDef parsing: alias → classes" {
     const A = gpa.allocator();
 
     var def = ASTNode.init(A, .StyleDef);
-    defer def.deinit();
+    defer def.deinit(A);
     try def.setContentOwned(A,
         \\# comment
         \\heading-1: h1-xl h1-weight

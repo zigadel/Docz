@@ -1,0 +1,211 @@
+@meta(title="Docz Spec — Section 9: Extensibility & Plugins", author="Docz Authors")
+
+# 9. Extensibility & Plugins
+
+Docz is designed to grow. The core covers common needs (headings, paragraphs, lists, math, code, styling), while **plugins** provide everything else — tables, graphs, diagrams, domain widgets, and organization‑specific blocks — without complicating the language.
+
+## 9.1 Goals
+
+- **Uniform surface:** every capability looks like a directive: `@name(...) ... @end`.
+- **Deterministic output:** plugin rendering must be pure with respect to inputs (document, attrs, content, assets).
+- **Portable HTML+CSS(+WASM):** output stays framework‑agnostic and cacheable.
+- **Secure-by-default:** no implicit script execution; WASM/JS opt‑in and sandboxed.
+- **Toolable:** directives are explicit, so indexing, linting, and conversion (`--explicit`) remain reliable.
+
+## 9.2 What counts as a plugin?
+
+A plugin can provide one or more of:
+
+- **Custom directives** (block or inline), e.g. `@table`, `@graph`, `@badge`.
+- **Head assets** (CSS, fonts, optional JS bridges), linked not inlined.
+- **Action handlers** for `on-click`, `on-hover`, … when WASM/JS is enabled.
+- **Importers/exporters** (e.g. CSV → table rows), if the pipeline opts in.
+
+## 9.3 Directive lifecycle (high level)
+
+1. **Tokenize → Parse:** `@name(attrs) ... @end` becomes an AST node: `{ name, attributes, content, span }`.
+2. **Dispatch:** the renderer looks up `name` in the **directive registry**.
+3. **Render:** the registered handler receives `(attributes, content, context)` and emits HTML nodes + optional head links.
+4. **Finalize:** head links are deduplicated; CSS may be inlined or externalized based on build flags.
+
+Unknown directives are **non‑fatal by default**: content is passed through as plain text with a warning. Use `--strict` to make unknown/invalid directives an error.
+
+## 9.4 Attributes & content (types & rules)
+
+- Attributes are **string‑valued**: `key="value"`. Numbers/booleans are strings at the syntax level.
+- Attribute names are **lower‑kebab‑case** by convention: `data-source`, `row-gap`.
+- Repeated attributes: last write wins.
+- Block content is delivered as raw text (the plugin may parse its own grammar or delegate to Docz again).
+
+### Inline vs block
+
+- **Inline directives** must render to an inline element and are allowed inside paragraphs and headings.
+- **Block directives** must render to block-level elements and cannot appear where inline content is required.
+
+## 9.5 Namespacing & versioning
+
+To avoid collisions across ecosystems, plugins may be referenced by a **package name** and optional **namespace**:
+
+- Package identity in `docz.settings.json`:
+  @code(lang="json")
+  {
+    "plugins": [
+      "ztable@0.3.1",
+      "zgraph@0.2.0",
+      "acme.lab.badge@1.0.0"
+    ]
+  }
+  @end
+
+- Directive names should be short and readable: `@table`, `@graph`, `@badge`.
+- If two plugins define the same directive, the **first registered wins** (deterministic order = settings order).
+
+## 9.6 Assets: CSS, fonts, optional JS
+
+Plugins may ask Docz to add **head assets**:
+
+- CSS files (preferred) rather than inline style tags.
+- Web fonts (via CSS links).
+- Optional JS bridges (for actions or hydration).
+
+Docz deduplicates identical links and orders head assets as:
+
+1. **Core CSS** → 2. **User CSS (file mode)** → 3. **Tailwind theme (if present)** → 4. **Plugin CSS** → 5. **KaTeX** → 6. **Plugin JS bridges**.
+
+No inline `<script>` is injected by default; bridges are linked from `third_party/` or the project’s `themes/` folder.
+
+## 9.7 Tailwind integration (optional)
+
+If Tailwind is present, plugins can lean on utility classes. If Tailwind is absent, plugins must **provide baseline CSS** so documents still render acceptably.
+
+@style(class="note")
+Guideline: prefer semantic containers (`<table>`, `<figure>`, `<ul>`) and add classes that degrade well without Tailwind.
+@end
+
+## 9.8 WASM/JS actions
+
+Plugins can expose **action handlers** bound to `on-*` attributes (e.g. `on-click="toggleDetails"`).
+
+- At render time, Docz emits attributes as `data-on-click="toggleDetails"` (safe).
+- A runtime binder (JS or WASM shim) attaches event listeners when present.
+- With WASM enabled, handlers may be exported functions (e.g. Zig) and called via the binder.
+
+@code(lang="dcz")
+@style(class="button" on-click="incrementCounter")
+Click me
+@end
+@end
+
+The above renders to a `<button>` (or `<span role="button">`) with `data-on-click="incrementCounter"`. The binder maps that to `exports.incrementCounter()` when available.
+
+## 9.9 Security model
+
+- **No implicit script execution.** All actions are **data attributes** until a binder attaches.
+- **CSP‑friendly:** head assets are link tags; no `eval` or untrusted inline scripts.
+- **KaTeX trust:** only a safe subset (`\htmlClass`, `\htmlStyle`, `\htmlData`, `\textcolor`, `\underline`, …) is allowed; throw‑on‑error is disabled, but rendering is strict.
+
+## 9.10 Writing a custom directive (example: @badge)
+
+**User-facing syntax:**
+
+@code(lang="dcz")
+@badge(kind="info") Heads up — quiz on Friday. @end
+
+@badge(kind="warning") Compute budget almost exhausted. @end
+
+@badge(kind="success") Build completed in 2.1s. @end
+@end
+
+**Rendered HTML (simplified):**
+
+@code(lang="html")
+<span class="dz-badge dz-badge-info">Heads up — quiz on Friday.</span>
+<span class="dz-badge dz-badge-warning">Compute budget almost exhausted.</span>
+<span class="dz-badge dz-badge-success">Build completed in 2.1s.</span>
+@end
+
+**CSS (plugin-provided or theme):**
+
+@code(lang="css")
+.dz-badge { display:inline-block; padding:.125rem .375rem; border-radius:.25rem; font:600 12px/1 system-ui,sans-serif }
+.dz-badge-info { background:#e6f0ff; color:#1946a1 }
+.dz-badge-warning { background:#fff7e6; color:#8a4b00 }
+.dz-badge-success { background:#e6ffed; color:#065f46 }
+@end
+
+## 9.11 Table & graph plugins (built-ins by convention)
+
+### @table (ZTable)
+
+- Accepts `data` via rows in content, CSV, or a `src` attribute.
+- Supports `caption`, `head`, `align`, `row-class`, `on-row-click`, …
+
+@code(lang="dcz")
+@table(caption="Experiment Results", align="center")
+time, voltage, current
+0.0,  0.12,    0.03
+0.5,  0.18,    0.04
+1.0,  0.23,    0.05
+@end
+@end
+
+### @graph (ZGraph)
+
+- Accepts series as CSV, JSON, or inline rows.
+- Renders to `<svg>` with CSS‑driven theming; optional `on-click` per point.
+
+@code(lang="dcz")
+@graph(type="line" width="640" height="320" caption="Voltage over time")
+t, V
+0.0, 0.12
+0.5, 0.18
+1.0, 0.23
+@end
+@end
+
+## 9.12 Packaging & installation
+
+- **Discovery:** declare packages in `docz.settings.json` → Docz resolves to `third_party/<pkg>/<ver>/`.
+- **Verification:** checksums recorded in `third_party/VENDOR.lock` (see `tools/vendor.*`).
+- **Runtime:** renderer registers each plugin’s directives at startup.
+
+@code(lang="json")
+{
+  "plugins": [
+    "ztable@0.3.1",
+    "zgraph@0.2.0",
+    "acme.diagram@1.4.0"
+  ]
+}
+@end
+
+## 9.13 Editor support
+
+The Docz VSCode extension can read plugin manifests to provide:
+
+- Syntax highlighting for directive names.
+- Attribute completion (`kind=`, `type=`, `src=`…).
+- Snippets and quick docs (hover).
+
+## 9.14 Testing a plugin
+
+- **Golden tests:** feed `.dcz` → compare generated HTML and head assets.
+- **Round‑trip tests:** ensure `--explicit` preserves meaning.
+- **Accessibility checks:** ARIA roles, keyboard navigation, color contrast.
+
+@style(class="note")
+Tip: keep plugin outputs DOM‑small and CSS‑first; only hydrate when necessary. This maximizes portability and print‑friendliness.
+@end
+
+## 9.15 Error handling & diagnostics
+
+- Unknown attribute → warning (ignored), unless `--strict`.
+- Missing required attribute → error with span to source.
+- Malformed content → error with a minimal, readable recovery rendering.
+
+## 9.16 Summary
+
+- Plugins extend Docz with **new directives**, **assets**, and **actions** while preserving the language’s clarity.
+- Keep outputs **semantic and CSS‑first**, bind actions via **data attributes**, and rely on **WASM/JS bridges** only when needed.
+- Ship with **fallback CSS** so documents remain legible without Tailwind or JS.
+

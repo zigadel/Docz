@@ -2,44 +2,39 @@ const std = @import("std");
 
 /// A lightweight Server-Sent Events (SSE) utility + broadcaster
 /// used by the web-preview server to push hot-reload notifications.
-///
-/// Usage sketch:
-///   var bc = Broadcaster.init(allocator);
-///   defer bc.deinit();
-///   const id = try bc.add(my_sink); // where my_sink implements `Sink`
-///   try bc.broadcast("reload", "examples/minimal.dcz");
-///   _ = bc.remove(id);
-/// A write target for SSE payloads (e.g., an HTTP response writer).
-/// Implementors provide a `writeFn` that accepts the raw SSE bytes.
-/// If `writeFn` errors, the broadcaster will drop that sink.
 pub const Sink = struct {
     ctx: *anyopaque,
     writeFn: *const fn (ctx: *anyopaque, bytes: []const u8) anyerror!void,
 };
 
+/// Small printf-to-ArrayList helper (Zig 0.16: no ArrayList.writer()).
+fn appendFmt(A: std.mem.Allocator, list: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) !void {
+    const s = try std.fmt.allocPrint(A, fmt, args);
+    defer A.free(s);
+    try list.appendSlice(A, s);
+}
+
 /// Build a valid SSE event payload. Splits `data` by lines and prefixes
 /// each with `data: `. Includes an `event:` line when `event` is non-empty.
 /// Returns an owned buffer; caller must free.
 pub fn formatSseEvent(allocator: std.mem.Allocator, event: []const u8, data: []const u8) ![]u8 {
-    var buf = std.ArrayList(u8).init(allocator);
-    errdefer buf.deinit();
-
-    const w = buf.writer();
+    var buf = std.ArrayList(u8){};
+    errdefer buf.deinit(allocator);
 
     if (event.len != 0) {
-        try w.print("event: {s}\n", .{event});
+        try appendFmt(allocator, &buf, "event: {s}\n", .{event});
     }
 
     var it = std.mem.splitScalar(u8, data, '\n');
     while (it.next()) |line| {
-        try w.print("data: {s}\n", .{line});
+        try appendFmt(allocator, &buf, "data: {s}\n", .{line});
     }
 
     // SSE event terminator: exactly one blank line
-    try w.writeAll("\n");
+    try buf.appendSlice(allocator, "\n");
 
-    // 👇 unwrap the error union
-    var out: []u8 = try buf.toOwnedSlice();
+    // Allocate result from `allocator`
+    var out: []u8 = try buf.toOwnedSlice(allocator);
 
     // Normalize: ensure exactly one trailing '\n'
     var n = out.len;
@@ -69,20 +64,20 @@ pub const Broadcaster = struct {
     pub fn init(allocator: std.mem.Allocator) Broadcaster {
         return .{
             .allocator = allocator,
-            .clients = std.ArrayList(Client).init(allocator),
+            .clients = std.ArrayList(Client){},
             .next_id = 1,
         };
     }
 
     pub fn deinit(self: *Broadcaster) void {
-        self.clients.deinit();
+        self.clients.deinit(self.allocator);
     }
 
     /// Add a sink; returns a unique client id.
     pub fn add(self: *Broadcaster, sink: Sink) !u64 {
         const id = self.next_id;
         self.next_id += 1;
-        try self.clients.append(.{ .id = id, .sink = sink });
+        try self.clients.append(self.allocator, .{ .id = id, .sink = sink });
         return id;
     }
 
@@ -157,13 +152,14 @@ test "formatSseEvent: data only (no event line)" {
 }
 
 const TestBuffer = struct {
+    allocator: std.mem.Allocator,
     list: std.ArrayList(u8),
 
     fn init(allocator: std.mem.Allocator) TestBuffer {
-        return .{ .list = std.ArrayList(u8).init(allocator) };
+        return .{ .allocator = allocator, .list = std.ArrayList(u8){} };
     }
     fn deinit(self: *TestBuffer) void {
-        self.list.deinit();
+        self.list.deinit(self.allocator);
     }
 
     fn sink(self: *TestBuffer) Sink {
@@ -175,7 +171,7 @@ const TestBuffer = struct {
 
     fn write(ctx: *anyopaque, bytes: []const u8) !void {
         var self: *TestBuffer = @ptrCast(@alignCast(ctx));
-        try self.list.appendSlice(bytes);
+        try self.list.appendSlice(self.allocator, bytes);
     }
 };
 

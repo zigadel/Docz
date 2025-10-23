@@ -1,5 +1,6 @@
 const std = @import("std");
 const docz = @import("docz"); // exposes Tokenizer, Parser, Renderer (HTML)
+const html_export = @import("html_export");
 
 pub fn run(A: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     const in_path = it.next() orelse {
@@ -11,7 +12,7 @@ pub fn run(A: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     const input = try readFileAlloc(A, in_path);
     defer A.free(input);
 
-    // 2) DCZ -> tokens -> AST  (no TokenizerConfig; new 2-arg API)
+    // 2) DCZ -> tokens -> AST
     const tokens = try docz.Tokenizer.tokenize(input, A);
     defer {
         docz.Tokenizer.freeTokens(A, tokens);
@@ -19,10 +20,10 @@ pub fn run(A: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     }
 
     var ast = try docz.Parser.parse(tokens, A);
-    defer ast.deinit();
+    defer ast.deinit(A);
 
     // 3) Render HTML
-    const html = try docz.Renderer.renderHTML(&ast, A);
+    const html = try html_export.exportHtml(&ast, A);
     defer A.free(html);
 
     // 4) Write <in>.html
@@ -36,13 +37,12 @@ pub fn run(A: std.mem.Allocator, it: *std.process.ArgIterator) !void {
 }
 
 fn readFileAlloc(alloc: std.mem.Allocator, path: []const u8) ![]u8 {
-    var f = try std.fs.cwd().openFile(path, .{});
-    defer f.close();
-    return try f.readToEndAlloc(alloc, 1 << 26);
+    // order: (path, alloc, std.Io.Limit)
+    return std.fs.cwd().readFileAlloc(path, alloc, @enumFromInt(1 << 26));
 }
 
 fn writeFile(path: []const u8, data: []const u8) !void {
     var f = try std.fs.cwd().createFile(path, .{ .truncate = true });
     defer f.close();
-    _ = try f.writeAll(data);
+    try f.writeAll(data);
 }

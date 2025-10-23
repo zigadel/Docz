@@ -18,7 +18,7 @@ test "integration: parser builds AST from token list" {
     }
 
     var ast = try docz.Parser.parse(tokens, allocator);
-    defer ast.deinit();
+    defer ast.deinit(allocator);
 
     // std.debug.print("🌲 AST has {d} top-level nodes\n", .{ast.children.items.len});
     try std.testing.expect(ast.children.items.len >= 1);

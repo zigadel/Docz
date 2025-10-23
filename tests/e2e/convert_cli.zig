@@ -7,19 +7,19 @@ const build_options = @import("build_options");
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn pathJoin2(alloc: std.mem.Allocator, a: []const u8, b: []const u8) ![]u8 {
-    var list = std.ArrayList([]const u8).init(alloc);
-    defer list.deinit();
-    try list.append(a);
-    try list.append(b);
+    var list = std.ArrayList([]const u8){};
+    defer list.deinit(alloc);
+    try list.append(alloc, a);
+    try list.append(alloc, b);
     return std.fs.path.join(alloc, list.items);
 }
 
 fn pathJoin3(alloc: std.mem.Allocator, a: []const u8, b: []const u8, c: []const u8) ![]u8 {
-    var list = std.ArrayList([]const u8).init(alloc);
-    defer list.deinit();
-    try list.append(a);
-    try list.append(b);
-    try list.append(c);
+    var list = std.ArrayList([]const u8){};
+    defer list.deinit(alloc);
+    try list.append(alloc, a);
+    try list.append(alloc, b);
+    try list.append(alloc, c);
     return std.fs.path.join(alloc, list.items);
 }
 
@@ -39,12 +39,6 @@ fn repoRootFromCwd(alloc: std.mem.Allocator) ![]u8 {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Launcher discovery (no nested functions)
-// Strategy:
-//   1) Prefer build_options.e2e_abspath (absolute, set by build.zig)
-//   2) Find-up from CWD for zig-out/bin/docz-e2e(.exe)
-//   3) Find-up from CWD for zig-out/bin/docz(.exe)
-//   4) Fallback to build_options.docz_abspath (absolute)
-// Emits strong diagnostics on failure.
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn tryOpenAbs(p: []const u8) bool {
@@ -96,13 +90,11 @@ fn ensureE2ELauncher(alloc: std.mem.Allocator) ![]u8 {
     const e2e_name = if (builtin.os.tag == .windows) "docz-e2e.exe" else "docz-e2e";
     const docz_name = if (builtin.os.tag == .windows) "docz.exe" else "docz";
 
-    // 1) baked e2e absolute (most reliable)
     if (@hasDecl(build_options, "e2e_abspath")) {
         const baked = build_options.e2e_abspath;
         if (tryOpenAbs(baked)) return try alloc.dupe(u8, baked);
     }
 
-    // 2) find-up: zig-out/bin/docz-e2e*
     const cwd_abs = try std.fs.cwd().realpathAlloc(alloc, ".");
     defer alloc.free(cwd_abs);
 
@@ -110,27 +102,23 @@ fn ensureE2ELauncher(alloc: std.mem.Allocator) ![]u8 {
     defer alloc.free(rel_e2e);
     if (try findUpFile(alloc, cwd_abs, rel_e2e, 8)) |hit| return hit;
 
-    // 3) find-up: zig-out/bin/docz*  (use docz directly if e2e isn’t present)
     const rel_docz = try std.fs.path.join(alloc, &[_][]const u8{ "zig-out", "bin", docz_name });
     defer alloc.free(rel_docz);
     if (try findUpFile(alloc, cwd_abs, rel_docz, 8)) |hit| return hit;
 
-    // 4) baked docz absolute
     if (@hasDecl(build_options, "docz_abspath")) {
         const baked_docz = build_options.docz_abspath;
         if (tryOpenAbs(baked_docz)) return try alloc.dupe(u8, baked_docz);
     }
 
-    // diagnostics
     std.debug.print(
         "[ensureE2ELauncher] Could not find a runnable CLI.\n" ++
             "  Tried (in order):\n" ++
             "    • build_options.e2e_abspath\n" ++
-            "    • find-up from CWD for \"zig-out/bin/{s}\"\n" ++
-            "    • find-up from CWD for \"zig-out/bin/{s}\"\n" ++
-            "    • build_options.docz_abspath\n" ++
-            "  CWD: {s}\n",
-        .{ e2e_name, docz_name, cwd_abs },
+            "    • find-up from CWD for zig-out/bin/{s}\n" ++
+            "    • find-up from CWD for zig-out/bin/{s}\n" ++
+            "    • build_options.docz_abspath\n",
+        .{ e2e_name, docz_name },
     );
 
     return error.FileNotFound;
@@ -221,7 +209,16 @@ test "e2e: docz convert dcz→tex and tex→dcz" {
     const tex = blk: {
         var f = try work.openFile("out.tex", .{});
         defer f.close();
-        break :blk try f.readToEndAlloc(A, 1 << 20);
+
+        var out = std.ArrayList(u8){};
+        defer out.deinit(A);
+        var tmp: [4096]u8 = undefined;
+        while (true) {
+            const n = try f.read(&tmp);
+            if (n == 0) break;
+            try out.appendSlice(A, tmp[0..n]);
+        }
+        break :blk try out.toOwnedSlice(A);
     };
     defer A.free(tex);
 
@@ -241,7 +238,16 @@ test "e2e: docz convert dcz→tex and tex→dcz" {
     const back = blk2: {
         var f = try work.openFile("back.dcz", .{});
         defer f.close();
-        break :blk2 try f.readToEndAlloc(A, 1 << 20);
+
+        var out = std.ArrayList(u8){};
+        defer out.deinit(A);
+        var tmp: [4096]u8 = undefined;
+        while (true) {
+            const n = try f.read(&tmp);
+            if (n == 0) break;
+            try out.appendSlice(A, tmp[0..n]);
+        }
+        break :blk2 try out.toOwnedSlice(A);
     };
     defer A.free(back);
 

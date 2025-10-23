@@ -33,18 +33,18 @@ fn spawnPreview(alloc: std.mem.Allocator, root_dir: []const u8, port: u16) !std.
     const exe_path = try std.fs.selfExePathAlloc(alloc);
     defer alloc.free(exe_path);
 
-    var argv = std.ArrayList([]const u8).init(alloc);
-    errdefer argv.deinit();
+    var argv = std.ArrayList([]const u8){};
+    errdefer argv.deinit(alloc);
 
-    try argv.append(exe_path);
-    try argv.append("preview");
-    try argv.append("--root");
-    try argv.append(root_dir);
-    try argv.append("--port");
+    try argv.append(alloc, exe_path);
+    try argv.append(alloc, "preview");
+    try argv.append(alloc, "--root");
+    try argv.append(alloc, root_dir);
+    try argv.append(alloc, "--port");
     const port_str = try std.fmt.allocPrint(alloc, "{}", .{port});
     defer alloc.free(port_str);
-    try argv.append(port_str);
-    try argv.append("--no-open"); // run opens the browser
+    try argv.append(alloc, port_str);
+    try argv.append(alloc, "--no-open"); // run opens the browser
 
     var child = std.process.Child.init(argv.items, alloc);
     child.stdin_behavior = .Ignore;
@@ -131,28 +131,28 @@ fn generateOnce(
             alloc.free(k.auto_href);
         }
 
-        var sn = std.ArrayList(u8).init(alloc);
-        errdefer sn.deinit();
+        var sn = std.ArrayList(u8){};
+        errdefer sn.deinit(alloc);
 
         // <link rel="stylesheet" href="...katex.min.css">
-        try sn.appendSlice("<link rel=\"stylesheet\" href=\"");
-        try sn.appendSlice(k.css_href);
-        try sn.appendSlice("\">\n");
+        try sn.appendSlice(alloc, "<link rel=\"stylesheet\" href=\"");
+        try sn.appendSlice(alloc, k.css_href);
+        try sn.appendSlice(alloc, "\">\n");
 
         // <script defer src="...katex.min.js"></script>
-        try sn.appendSlice("<script defer src=\"");
-        try sn.appendSlice(k.js_href);
-        try sn.appendSlice("\"></script>\n");
+        try sn.appendSlice(alloc, "<script defer src=\"");
+        try sn.appendSlice(alloc, k.js_href);
+        try sn.appendSlice(alloc, "\"></script>\n");
 
         // <script defer src="...auto-render.min.js"></script>
-        try sn.appendSlice("<script defer src=\"");
-        try sn.appendSlice(k.auto_href);
-        try sn.appendSlice("\"></script>\n");
+        try sn.appendSlice(alloc, "<script defer src=\"");
+        try sn.appendSlice(alloc, k.auto_href);
+        try sn.appendSlice(alloc, "\"></script>\n");
 
         // Inline init (trust: true so \htmlClass/\htmlId/\htmlStyle/\htmlData work)
         // + gentle strictness and throwOnError:false for authoring friendliness.
         // Also add a convenience macro \class → \htmlClass for nicer authoring.
-        try sn.appendSlice(
+        try sn.appendSlice(alloc,
             \\<script>
             \\document.addEventListener('DOMContentLoaded', function () {
             \\  if (!window.renderMathInElement) return;
@@ -175,7 +175,7 @@ fn generateOnce(
             \\
         );
 
-        const snippet = try sn.toOwnedSlice();
+        const snippet = try sn.toOwnedSlice(alloc);
         const injected = try html_ops.insertBeforeHeadClose(alloc, final_html, snippet);
         alloc.free(final_html);
         final_html = injected;

@@ -17,31 +17,33 @@ fn trimRightSpaces(line: []const u8) []const u8 {
 /// - Trim leading/trailing blank lines
 /// - Ensure single trailing newline
 fn normalizeLatex(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
-    var tmp = std.ArrayList(u8).init(alloc);
-    defer tmp.deinit();
+    // ArrayList for this Zig requires passing the allocator to operations.
+    var tmp = std.ArrayList(u8){};
+    defer tmp.deinit(alloc);
 
     // 1) trim trailing spaces line-by-line
     var it = std.mem.tokenizeScalar(u8, s, '\n');
     var first_line = true;
     while (it.next()) |line| {
         const t = trimRightSpaces(line);
-        if (!first_line) try tmp.append('\n');
-        try tmp.appendSlice(t);
+        if (!first_line) try tmp.append(alloc, '\n');
+        try tmp.appendSlice(alloc, t);
         first_line = false;
     }
 
     // 2) collapse >2 newlines → exactly 2
-    var out = std.ArrayList(u8).init(alloc);
+    var out = std.ArrayList(u8){};
+    defer out.deinit(alloc);
     var i: usize = 0;
     var nl_count: usize = 0;
     while (i < tmp.items.len) : (i += 1) {
         const c = tmp.items[i];
         if (c == '\n') {
             nl_count += 1;
-            if (nl_count <= 2) try out.append('\n');
+            if (nl_count <= 2) try out.append(alloc, '\n');
         } else {
             nl_count = 0;
-            try out.append(c);
+            try out.append(alloc, c);
         }
     }
 
@@ -52,13 +54,13 @@ fn normalizeLatex(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
     var end: usize = out.items.len;
     while (end > start and out.items[end - 1] == '\n') end -= 1;
 
-    // 4) build final buffer; deinit 'out' to avoid leaks
-    var final_buf = std.ArrayList(u8).init(alloc);
-    if (end > start) try final_buf.appendSlice(out.items[start..end]);
-    try final_buf.append('\n');
-    out.deinit();
+    // 4) build final buffer
+    var final_buf = std.ArrayList(u8){};
+    defer final_buf.deinit(alloc);
+    if (end > start) try final_buf.appendSlice(alloc, out.items[start..end]);
+    try final_buf.append(alloc, '\n');
 
-    return final_buf.toOwnedSlice();
+    return try final_buf.toOwnedSlice(alloc);
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -100,7 +102,7 @@ test "integration: LaTeX ↔ DCZ round-trip via AST (baseline sample)" {
         A.free(tokens);
     }
     var ast = try docz.Parser.parse(tokens, A);
-    defer ast.deinit();
+    defer ast.deinit(A);
 
     // 3) AST → LaTeX
     const tex_output = try latex_export.exportAstToLatex(&ast, A);
@@ -140,7 +142,7 @@ test "integration: heading level clamp (>=4 → \\subsubsection{})" {
         A.free(tokens);
     }
     var ast = try docz.Parser.parse(tokens, A);
-    defer ast.deinit();
+    defer ast.deinit(A);
 
     const tex_output = try latex_export.exportAstToLatex(&ast, A);
     defer A.free(tex_output);

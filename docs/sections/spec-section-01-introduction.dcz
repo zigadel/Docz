@@ -1,0 +1,47 @@
+@meta(title="Docz Specification — Section 1: Introduction", author="Docz Authors", section="1")
+
+# 1. Introduction
+
+Docz is a **document language and toolchain** designed to make technical writing — from STEM notes and research papers to specs, guides, and documentation — **as clear, fast, and programmable as possible**.
+
+It combines the familiarity of Markdown with the precision of LaTeX and the interactivity of modern notebooks, while avoiding their limitations. Docz compiles to **portable HTML + CSS (+ optional WASM)** and stays readable to both **humans** and **AI**.
+
+## 1.1 What Docz Gives You
+
+- **Markdown-like brevity** for everyday writing (headings, lists, links).
+- **First-class math, code blocks, and styling** through declarative `@directives`.
+- **Deterministic compilation** to clean HTML that is portable, themeable, and easy to style.
+- **Optional power-ups:** Tailwind themes, KaTeX math, syntax highlighting, and live preview.
+- **A single, uniform model:** shorthand when you want speed, explicit directives when you need precision.
+
+## 1.2 Why Docz Exists
+
+Existing tools fall short:
+
+- **Markdown** is convenient, but underspecified and inconsistent across flavors.
+- **LaTeX** is precise, but verbose, brittle, and slow to iterate on.
+- **Jupyter-style notebooks** are interactive, but tied to a runtime and awkward to version.
+
+Docz unifies the strengths of all three: **simplicity, clarity, interactivity, portability** — with a grammar that’s explicit enough for machines and ergonomic enough for humans.
+
+## 1.3 Core Philosophy
+
+- **Clarity first.** Documents should be easy to read and easy to parse (for humans and AI).
+- **Explicit over clever.** Everything has a canonical explicit form; shorthand is optional sugar.
+- **Programmable by design.** Text, math, code, and interactive views compose cleanly.
+- **No hidden global state.** What you write is what gets rendered.
+- **Future‑proof output.** Docz targets stable web primitives (HTML/CSS/WASM).
+
+Docz lets you stay **minimal when you want brevity** — and **explicit when you need control**.
+
+## 1.4 Programmability via WASM
+
+Docz is not only about text and formatting — it is also a **programmable document format**. Through **WebAssembly (WASM)**, `.dcz` files can embed live, sandboxed code that executes at render time.
+
+- **Zig‑first.** Docz is written in Zig, and Zig compiles to WASM seamlessly. Zig is the first‑class supported language for inline execution.
+- **Language‑agnostic by design.** Any language that targets WASM (Rust, C, Go, AssemblyScript, etc.) can run inside Docz.
+- **Deterministic + portable.** The result is a single HTML document with optional WASM modules — easy to version, host, and share.
+- **Security‑aware.** Execution is sandboxed; actions are explicit. (Docz favors opt‑in features over magic defaults.)
+
+With WASM enabled, Docz becomes a superset of Markdown/LaTeX and a portable alternative to traditional notebooks: **text, math, code, and interactive views in one coherent format**.
+

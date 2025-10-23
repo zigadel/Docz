@@ -1,0 +1,255 @@
+@meta(title="Docz Spec — 4. Block Directives", author="Docz Authors", version="2025-09-01")
+
+# 4. Block Directives
+
+Block directives create structure. For each directive, Docz offers:
+- **Shorthand** for fast writing (Markdown-inspired).
+- **Explicit form** for precision and tools (`--explicit` will normalize to these).
+
+Where applicable, both forms are shown side‑by‑side.
+
+## 4.1 Headings
+
+Headings are structural and map to `<h1>…<h6>`.
+
+@style(class="subtle")
+Shorthand:
+@end
+
+@code(lang="dcz")
+# Level 1 Heading
+## Level 2 Heading
+### Level 3 Heading
+#### Level 4 Heading
+##### Level 5 Heading
+###### Level 6 Heading
+@end
+
+@style(class="subtle")
+Explicit:
+@end
+
+@code(lang="dcz")
+@heading(level=1) Level 1 Heading @end
+@heading(level=2) Level 2 Heading @end
+@heading(level=3) Level 3 Heading @end
+@heading(level=4) Level 4 Heading @end
+@heading(level=5) Level 5 Heading @end
+@heading(level=6) Level 6 Heading @end
+@end
+
+@style(class="note")
+Both forms generate the same HTML headings. Use shorthand while drafting; convert with `docz convert file.dcz --explicit` when you need canonical output.
+@end
+
+## 4.2 Paragraphs
+
+A paragraph is one or more lines of text separated by a blank line. Docz treats these as `<p>` blocks.
+
+@code(lang="dcz")
+This is a paragraph.
+It continues on the next line.
+
+This is a new paragraph.
+@end
+
+@style(class="note")
+There is no explicit `@p` in the core grammar. Paragraphs are inferred from text and blank lines.
+@end
+
+## 4.3 Code Blocks
+
+Code blocks are verbatim and escaped (HTML‑safe). You must specify a language to enable downstream tooling/themes to target it (e.g., syntax highlighting).
+
+@style(class="subtle")
+Explicit only:
+@end
+
+@code(lang="dcz")
+@code(lang="zig")
+const std = @import("std");
+pub fn main() void {
+    std.debug.print("Hello, world!\\n", .{});
+}
+@end
+@end
+
+@style(class="note")
+- The `lang` attribute is free‑form (e.g., `zig`, `bash`, `python`, `json`, `text`).  
+- No Markdown triple‑backticks are used in Docz; `@code` avoids ambiguity for parsers and AI tools.
+@end
+
+## 4.4 Math Blocks
+
+Math blocks render with KaTeX (when the renderer has KaTeX assets available). Content is standard LaTeX math.
+
+@style(class="subtle")
+Explicit only:
+@end
+
+@code(lang="dcz")
+@math
+E = mc^2
+@end
+@end
+
+@style(class="note")
+- Inline math uses `$ ... $`; display math uses `@math ... @end`.  
+- See **Section 7 (Math & KaTeX)** for inline styling within math (e.g., `\\htmlClass{class}{...}`) and trusted commands.
+@end
+
+## 4.5 Style Blocks
+
+Style blocks wrap content and apply CSS classes or inline styles. This is the primary way to do semantic styling in Docz.
+
+@style(class="subtle")
+Class‑based (Tailwind or your own classes):
+@end
+
+@code(lang="dcz")
+@style(class="prose lg:prose-xl text-slate-800")
+This paragraph is rendered with larger, readable typography.
+@end
+@end
+
+@style(class="subtle")
+Inline CSS:
+@end
+
+@code(lang="dcz")
+@style(style="background:#111; color:#eee; padding:12px; border-radius:8px")
+Dark panel with inline CSS.
+@end
+@end
+
+@style(class="note")
+- Use **`class`** for utility‑first workflows (e.g., Tailwind).  
+- Use **`style`** for one‑off CSS. Both can be combined: `@style(class="badge" style="--h:42") ... @end`.
+@end
+
+## 4.6 Global Styles: Aliases and Raw CSS
+
+Define semantic aliases once, then refer to them by name in `@style` blocks. You can also embed raw CSS.
+
+@style(class="subtle")
+Semantic aliases:
+@end
+
+@code(lang="dcz")
+@style(mode="global")
+# Alias map: last write wins
+heading-hero: text-4xl font-extrabold tracking-tight
+body-copy: prose prose-slate max-w-none
+callout: ring-1 ring-amber-300 bg-amber-50 rounded-md p-3
+@end
+
+@style(class="subtle")
+Using aliases:
+@end
+
+@code(lang="dcz")
+@style(name="heading-hero")
+Block Aliases Make Styling Readable
+@end
+
+@style(name="callout")
+This block uses the `callout` alias defined above.
+@end
+@end
+
+@style(class="subtle")
+Raw CSS:
+@end
+
+@code(lang="dcz")
+@css
+.badge { display:inline-block; padding:.15rem .5rem; border-radius:.375rem; background:#eef; color:#225; }
+.k { color:#0a7; text-decoration:underline dotted; }
+@end
+@end
+
+## 4.7 Media (Images)
+
+Embed images and other media. The exporter currently emits `<img>` for images.
+
+@code(lang="dcz")
+@media(src="./img/diagram.png" alt="Architecture Diagram" title="System Overview")
+@end
+@end
+
+@style(class="note")
+- Additional attributes may be added over time (e.g., `width`, `height`, `loading`, `decoding`).  
+- For video or audio, prefer raw HTML tags until dedicated directives land.
+@end
+
+## 4.8 Document Metadata (Head)
+
+Set document‑level metadata once; exporters map these into `<title>` and `<meta>` tags, and may also inject default CSS.
+
+@code(lang="dcz")
+@meta(
+  title="Docz Spec — Block Directives",
+  author="Docz Authors",
+  description="Canonical examples for block directives in Docz",
+  default_css="docz.core.css"
+)
+@end
+@end
+
+## 4.9 Imports (Stylesheets and Assets)
+
+Import external CSS (or other assets) that should be linked from the document head.
+
+@code(lang="dcz")
+@import(href="/styles/site.css")
+@end
+@end
+
+@style(class="note")
+- `@import(href="...")` becomes `<link rel="stylesheet" href="...">` in HTML.  
+- Prefer `@css` for small snippets; use `@import` for large or shared stylesheets.
+@end
+
+## 4.10 Nesting and Composition
+
+Blocks can be nested to achieve complex layout while keeping content readable.
+
+@code(lang="dcz")
+@style(class="prose")
+# A Styled Section
+
+@style(name="callout")
+Remember: block directives compose. You can nest `@style` around `@code` or `@math`.
+@end
+
+@code(lang="bash")
+zig build run -- run ./docs/SPEC.dcz
+@end
+
+@math
+\\text{Signal}(t) = A \\cdot \\sin(2\\pi f t + \\varphi)
+@end
+@end
+@end
+
+## 4.11 Normalization (Explicit Form)
+
+Use the CLI to convert shorthand to explicit form for canonical storage or automated tooling.
+
+@code(lang="bash")
+docz convert input.dcz --explicit > canonical.dcz
+@end
+
+@style(class="note")
+This normalization step is optional but recommended for large docs, CI, or when using Docz as an interchange format for tools.
+@end
+
+## 4.12 Common Pitfalls
+
+@style(class="prose")
+- Don’t mix Markdown triple‑backticks for code; always use `@code(lang="...")`.  
+- Leave a blank line between paragraphs.  
+- Prefer `class` for Tailwind/utility workflows; use `style` for one‑off CSS.  
+- Put global style aliases in a single `@style(mode="global")` block near the top of the document.  
+- KaTeX is display‑only; see Section 7 for trusted commands if you plan to style inside math.
+@end

@@ -1,5 +1,6 @@
 const std = @import("std");
 const docz = @import("docz");
+const web_preview = @import("web_preview");
 
 // -----------------------------------------------------------------------------
 // Tiny settings loader (flat JSON, no std.json dependency)
@@ -13,25 +14,31 @@ const FileSettings = struct {
 };
 
 fn readFileAlloc(alloc: std.mem.Allocator, path: []const u8, max: usize) ![]u8 {
-    var f = try std.fs.cwd().openFile(path, .{});
-    defer f.close();
-    return try f.readToEndAlloc(alloc, max);
+    // Zig 0.16: Dir.readFileAlloc(path, allocator, Io.Limit)
+    return std.fs.cwd().readFileAlloc(path, alloc, @enumFromInt(max));
+}
+
+fn skipWs(buf: []const u8, start: usize) usize {
+    var i = start;
+    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+    return i;
 }
 
 fn findJsonStringValue(buf: []const u8, key: []const u8) ?[]const u8 {
+    // Build the `"key"` pattern using a tiny fixed buffer (no heap leaks).
     var pat_buf: [128]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&pat_buf);
     const A = fba.allocator();
     const quoted_key = std.fmt.allocPrint(A, "\"{s}\"", .{key}) catch return null;
 
     const key_i = std.mem.indexOf(u8, buf, quoted_key) orelse return null;
-
     var i: usize = key_i + quoted_key.len;
-    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+
+    i = skipWs(buf, i);
     if (i >= buf.len or buf[i] != ':') return null;
     i += 1;
 
-    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+    i = skipWs(buf, i);
     if (i >= buf.len or buf[i] != '"') return null;
     i += 1;
 
@@ -49,17 +56,17 @@ fn findJsonIntValue(comptime T: type, buf: []const u8, key: []const u8) ?T {
     const quoted_key = std.fmt.allocPrint(A, "\"{s}\"", .{key}) catch return null;
 
     const key_i = std.mem.indexOf(u8, buf, quoted_key) orelse return null;
-
     var i: usize = key_i + quoted_key.len;
-    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+
+    i = skipWs(buf, i);
     if (i >= buf.len or buf[i] != ':') return null;
     i += 1;
 
-    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+    i = skipWs(buf, i);
     if (i >= buf.len) return null;
 
     const start = i;
-    while (i < buf.len and buf[i] >= '0' and buf[i] <= '9') : (i += 1) {}
+    while (i < buf.len and (buf[i] >= '0' and buf[i] <= '9')) : (i += 1) {}
     if (i == start) return null;
 
     return std.fmt.parseInt(T, buf[start..i], 10) catch null;
@@ -72,13 +79,13 @@ fn findJsonBoolValue(buf: []const u8, key: []const u8) ?bool {
     const quoted_key = std.fmt.allocPrint(A, "\"{s}\"", .{key}) catch return null;
 
     const key_i = std.mem.indexOf(u8, buf, quoted_key) orelse return null;
-
     var i: usize = key_i + quoted_key.len;
-    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+
+    i = skipWs(buf, i);
     if (i >= buf.len or buf[i] != ':') return null;
     i += 1;
 
-    while (i < buf.len and (buf[i] == ' ' or buf[i] == '\t' or buf[i] == '\r' or buf[i] == '\n')) : (i += 1) {}
+    i = skipWs(buf, i);
     if (i >= buf.len) return null;
 
     if (std.mem.startsWith(u8, buf[i..], "true")) return true;
@@ -164,8 +171,8 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
         }
     }
 
-    // Start server
-    var server = try docz.web_preview.server.PreviewServer.init(alloc, doc_root);
+    // Start server (module is `web_preview`; type is `PreviewServer`)
+    var server = try web_preview.PreviewServer.init(alloc, doc_root);
     defer server.deinit();
 
     // Optionally open the browser

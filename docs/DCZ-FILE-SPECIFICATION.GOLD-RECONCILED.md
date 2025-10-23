@@ -1,0 +1,1719 @@
+# DCZ File Specification — Reconciled GOLD (Markdown)
+
+**Source of truth:** `DCZ-FILE-SPECIFICATION.revised(1).dcz` (size: 53444 bytes).  
+**Generated:** 2025-09-02T12:46:34.945877Z
+
+This Markdown mirrors the current canonical `.dcz` specification exactly in the appendix below,
+so you can paste this file into other threads or repos and retain the exact examples and directives.
+When in doubt, the fenced `.dcz` appendix is authoritative.
+
+---
+
+## Appendix A — Canonical `.dcz` specification (verbatim)
+
+```dcz
+@meta(title="Docz – DCZ File Specification (Draft)", author="Docz Authors", version="0.1.0")
+@end
+
+@meta(title="Docz Specification — Section 1: Introduction", author="Docz Authors", section="1")
+```
+
+# 1. Introduction
+
+Docz is a **document language and toolchain** designed to make technical writing — from STEM notes and research papers to specs, guides, and documentation — **as clear, fast, and programmable as possible**.
+
+It combines the familiarity of Markdown with the precision of LaTeX and the interactivity of modern notebooks, while avoiding their limitations. Docz compiles to **portable HTML + CSS (+ optional WASM)** and stays readable to both **humans** and **AI**.
+
+## 1.1 What Docz Gives You
+
+- **Markdown-like brevity** for everyday writing (headings, lists, links).
+- **First-class math, code blocks, and styling** through declarative `@directives`.
+- **Deterministic compilation** to clean HTML that is portable, themeable, and easy to style.
+- **Optional power-ups:** Tailwind themes, KaTeX math, syntax highlighting, and live preview.
+- **A single, uniform model:** shorthand when you want speed, explicit directives when you need precision.
+
+## 1.2 Why Docz Exists
+
+Existing tools fall short:
+
+- **Markdown** is convenient, but underspecified and inconsistent across flavors.
+- **LaTeX** is precise, but verbose, brittle, and slow to iterate on.
+- **Jupyter-style notebooks** are interactive, but tied to a runtime and awkward to version.
+- **Web Development** (**HTML** + **CSS** + **JS/TS** + **WASM**) is all-powerful but not beginner-friendly
+
+Docz unifies the strengths of all four: **simplicity, clarity, interactivity, portability** — with a grammar that’s explicit enough for machines and ergonomic enough for humans.
+
+## 1.3 Core Philosophy
+
+- **Clarity first.** Documents should be easy to read and parse (for humans and AI).
+- **Explicit, Intuitive, and Ergonomic.** Everything has a canonical explicit form; shorthand is optional.
+- **Programmable by design.** Text, math, code, and interactive views compose cleanly.
+- **No hidden global state.** What you write is what gets rendered.
+- **Future‑proof output.** Docz targets stable web primitives (HTML/CSS/WASM).
+
+Docz lets you stay **minimal when you want brevity** — and **explicit when you need control**.
+
+## 1.4 Programmability via WASM
+
+Docz is not only about text and formatting — it is also a **programmable document format**. Through **WebAssembly (WASM)**, `.dcz` files can embed live, sandboxed code that executes at render time.
+
+- **Zig‑first.** Docz is written in Zig, and Zig compiles to WASM seamlessly. Zig is the first‑class supported language for inline execution.
+- **Language‑agnostic by design.** Any language that targets WASM (Rust, C, Go, AssemblyScript, etc.) can run inside Docz.
+- **Deterministic + portable.** The result is a single HTML document with optional WASM modules — easy to version, host, and share.
+- **Security‑aware.** Execution is sandboxed; actions are explicit. (Docz favors opt‑in features over magic defaults.)
+
+With WASM enabled, Docz becomes a superset of Markdown/LaTeX and a portable alternative to traditional notebooks: **text, math, code, and interactive views in one coherent format**.
+
+# Quick Glimpse
+
+Docz feels like Markdown when you want speed, and like a tiny, programmable document language when you need precision.
+
+## 1. Begin by defining Metadata of the `.dcz` file
+
+There are two acceptable syntaxes for this.
+
+### a. Metadata-as-parameters of `@meta`
+
+```
+@meta(title="Mathematics — Ring-Theory x Geometry", author="Smarty Pants")
+```
+
+### b. Metadata-as-body of `@meta`
+
+```
+@meta
+title="Mathematics — Ring-Theory x Geometry", 
+author="Smarty Pants",
+prerequisite_knowledge=["prelude", "vol5", "vol7", "vol9.ch1", "vol9.ch2"],
+relevant_fields_of_study=["analytic_geometry", "number_theory", "ring theory"]
+relevant_people=["Carl Gauss", "Isaac Newton", "Lagrange",  "Cauchy", "Emmy Noether"]
+@end
+```
+
+### c. Hybrid metadata-as-parameters & body
+
+```
+@meta(title="Mathematics — Ring-Theory x Geometry", author="Smarty Pants")
+prerequisite_knowledge=["prelude", "vol5", "vol7", "vol9.ch1", "vol9.ch2"],
+relevant_fields_of_study=["analytic_geometry", "number_theory", "ring theory"]
+relevant_people=["Carl Gauss", "Isaac Newton", "Lagrange",  "Cauchy", "Emmy Noether"]
+@end
+```
+
+## 2. Definine Section Headers
+
+### a. Explicit Syntaxes
+
+#### (i)
+
+```
+@heading(level=1)Welcome to Wrestlemania.com!@end
+
+@heading(level=2)Ticket Prices@end
+
+@heading(level=2)Tour Locations@end
+```
+
+#### (ii)
+
+```
+@heading(level=1){Welcome to Wrestlemania.com!}
+
+@heading(level=2){Ticket Prices}
+
+@heading(level=2){Tour Locations}
+```
+
+### b. `.md`-inspired shorthand syntax
+
+```
+# Welcome to Wrestlemania.com!
+
+## Ticket Prices
+
+## Tour Locations
+```
+
+### c. Raw `HTML` in `.dcz` 
+
+```
+<h1>Welcome to Wrestlemania.com</h1>
+<h2>Ticket Prices</h2>
+<h2>Tour Locations</h2>
+```
+
+---
+
+### Unaccounted text is placed in `<section>`
+
+---
+
+### Paragraph (shorthand).
+
+#### Docz-explicit syntax
+
+```sh
+@p(class="text-green-500")
+Some random text.
+@end
+```
+
+#### Raw HTML is understood in `.dcz` files
+
+```html
+<p></p>
+```
+
+### Metadata
+
+```sh
+@meta(title="Docz Spec — Section 3: Directives Overview", author="Docz Authors")
+```
+
+
+---
+
+
+### Example: Einstein’s insight
+
+THIS IS WHERE I GOT UP TO. PLEASE PICK UP FROM HERE
+
+```sh
+@math
+E = mc^2
+@end
+
+@style(class="note")
+This equation shows how mass and energy are interchangeable.
+@end
+
+- Write equations inline: $F = ma$
+- Link like Markdown: [Zig](https://ziglang.org)
+- Style inline with a one‑liner: @(class="highlight"){important}
+- Or the block form when you need multiple lines:
+@style(class="callout")
+Multiple lines of emphasized prose.
+Still readable. Still minimal.
+@end
+```
+
+## Code feels natural
+```
+@code(lang="zig")
+const std = @import("std");
+pub fn main() void {
+    std.debug.print("Hello from Zig!\\n", .{});
+}
+@end
+```
+
+
+
+```
+
+# 3. Directives Overview
+
+Directives are Docz’s core building blocks. A directive is an explicit block with a name, optional attributes, and content:
+@code(lang="text")
+@name(attr="value", attr2="value2")
+  content…
+@end
+@end
+
+Directives are designed to be **unambiguous** for parsers and **ergonomic** for humans. Most everyday constructs also have a **shorthand** form that compiles to the same output.
+
+## 3.1 Shorthand vs Explicit
+
+Shorthand is fast to write; explicit form is canonical and guaranteed to be unambiguous. Both are equivalent.
+
+@style(class="example-grid")
+@code(lang="dcz")
+# Shorthand
+# Title (h1)
+## Section (h2)
+
+# Explicit
+@heading(level=1) Title @end
+@heading(level=2) Section @end
+@end
+@end
+
+Paragraphs:
+@style(class="example-grid")
+@code(lang="dcz")
+# Shorthand
+This is a paragraph.
+
+# Explicit
+@p
+This is a paragraph.
+@end
+@end
+@end
+
+## 3.2 Inline vs Block
+
+**Inline directives** live inside a paragraph; **block directives** span multiple lines.
+
+Inline styling (two ways — explicit and shorthand):
+
+@style(class="example-grid")
+@code(lang="dcz")
+# Explicit inline style
+The force is @style(class="highlight") mass @end important.
+
+# Shorthand inline style
+The force is @(class="highlight"){mass} important.
+@end
+@end
+
+Block examples:
+@style(class="example-grid")
+@code(lang="dcz")
+@math
+E = mc^2
+@end
+
+@code(lang="bash")
+zig build run -- run ./examples/hello.dcz
+@end
+@end
+@end
+
+## 3.3 Equivalence & Parsing Guarantees
+
+- Shorthand is **syntactic sugar** for directives.
+- Every shorthand form has a stable explicit counterpart.
+- Parsers and tools can always normalize with `docz convert --explicit`.
+
+## 3.4 Raw HTML Escape Hatch
+
+Docz lets you embed raw HTML when you need full control (e.g., `<details>`, `<canvas>`, or custom widgets). Prefer Docz directives when possible.
+
+@code(lang="dcz")
+<p class="note">Raw HTML block — use sparingly.</p>
+@end
+
+## 3.5 Attribute Rules
+
+- Attributes use `key="value"` (double quotes required for safety/clarity).
+- Booleans are strings: `enabled="true"` / `enabled="false"` (future-proof).
+- Multiple classes go in one string: `class="prose text-sm italic"`.
+- Prefer `class="..."` for utility classes (Tailwind or your own); use `style="..."` for ad‑hoc CSS.
+
+Inline style examples:
+@style(class="example-grid")
+@code(lang="dcz")
+# Utility-first
+@style(class="text-blue-600 font-semibold") Link @end
+
+# Ad-hoc CSS
+@style(style="color:#0a0; text-decoration:underline") Green @end
+@end
+@end
+
+## 3.6 Nesting (Inline + Block)
+
+Directives compose. You can nest inline styles inside math explanations or headings inside styled callouts. Keep nesting shallow for readability.
+
+@style(class="example-grid")
+@code(lang="dcz")
+@style(class="callout")
+  @heading(level=3) Note @end
+  You can emphasize @(class="underline"){key} terms even inside rich blocks.
+@end
+@end
+@end
+
+---
+
+**Next:** Section 4 covers the standard block directives in detail (headings, paragraphs, math, code, and style).
+
+
+@meta(title="Docz Spec — 4. Block Directives", author="Docz Authors", version="2025-09-01")
+
+# 4. Block Directives
+
+Block directives create structure. For each directive, Docz offers:
+- **Shorthand** for fast writing (Markdown-inspired).
+- **Explicit form** for precision and tools (`--explicit` will normalize to these).
+
+Where applicable, both forms are shown side‑by‑side.
+
+## 4.1 Headings
+
+Headings are structural and map to `<h1>…<h6>`.
+
+@style(class="subtle")
+Shorthand:
+@end
+
+@code(lang="dcz")
+# Level 1 Heading
+## Level 2 Heading
+### Level 3 Heading
+#### Level 4 Heading
+##### Level 5 Heading
+###### Level 6 Heading
+@end
+
+@style(class="subtle")
+Explicit:
+@end
+
+@code(lang="dcz")
+@heading(level=1) Level 1 Heading @end
+@heading(level=2) Level 2 Heading @end
+@heading(level=3) Level 3 Heading @end
+@heading(level=4) Level 4 Heading @end
+@heading(level=5) Level 5 Heading @end
+@heading(level=6) Level 6 Heading @end
+@end
+
+@style(class="note")
+Both forms generate the same HTML headings. Use shorthand while drafting; convert with `docz convert file.dcz --explicit` when you need canonical output.
+@end
+
+## 4.2 Paragraphs
+
+A paragraph is one or more lines of text separated by a blank line. Docz treats these as `<p>` blocks.
+
+@code(lang="dcz")
+This is a paragraph.
+It continues on the next line.
+
+This is a new paragraph.
+@end
+
+@style(class="note")
+There is no explicit `@p` in the core grammar. Paragraphs are inferred from text and blank lines.
+@end
+
+## 4.3 Code Blocks
+
+Code blocks are verbatim and escaped (HTML‑safe). You must specify a language to enable downstream tooling/themes to target it (e.g., syntax highlighting).
+
+@style(class="subtle")
+Explicit only:
+@end
+
+@code(lang="dcz")
+@code(lang="zig")
+const std = @import("std");
+pub fn main() void {
+    std.debug.print("Hello, world!\\n", .{});
+}
+@end
+@end
+
+@style(class="note")
+- The `lang` attribute is free‑form (e.g., `zig`, `bash`, `python`, `json`, `text`).  
+- No Markdown triple‑backticks are used in Docz; `@code` avoids ambiguity for parsers and AI tools.
+@end
+
+## 4.4 Math Blocks
+
+Math blocks render with KaTeX (when the renderer has KaTeX assets available). Content is standard LaTeX math.
+
+@style(class="subtle")
+Explicit only:
+@end
+
+@code(lang="dcz")
+@math
+E = mc^2
+@end
+@end
+
+@style(class="note")
+- Inline math uses `$ ... $`; display math uses `@math ... @end`.  
+- See **Section 7 (Math & KaTeX)** for inline styling within math (e.g., `\\htmlClass{class}{...}`) and trusted commands.
+@end
+
+## 4.5 Style Blocks
+
+Style blocks wrap content and apply CSS classes or inline styles. This is the primary way to do semantic styling in Docz.
+
+@style(class="subtle")
+Class‑based (Tailwind or your own classes):
+@end
+
+@code(lang="dcz")
+@style(class="prose lg:prose-xl text-slate-800")
+This paragraph is rendered with larger, readable typography.
+@end
+@end
+
+@style(class="subtle")
+Inline CSS:
+@end
+
+@code(lang="dcz")
+@style(style="background:#111; color:#eee; padding:12px; border-radius:8px")
+Dark panel with inline CSS.
+@end
+@end
+
+@style(class="note")
+- Use **`class`** for utility‑first workflows (e.g., Tailwind).  
+- Use **`style`** for one‑off CSS. Both can be combined: `@style(class="badge" style="--h:42") ... @end`.
+@end
+
+## 4.6 Global Styles: Aliases and Raw CSS
+
+Define semantic aliases once, then refer to them by name in `@style` blocks. You can also embed raw CSS.
+
+@style(class="subtle")
+Semantic aliases:
+@end
+
+@code(lang="dcz")
+@style(mode="global")
+# Alias map: last write wins
+heading-hero: text-4xl font-extrabold tracking-tight
+body-copy: prose prose-slate max-w-none
+callout: ring-1 ring-amber-300 bg-amber-50 rounded-md p-3
+@end
+
+@style(class="subtle")
+Using aliases:
+@end
+
+@code(lang="dcz")
+@style(name="heading-hero")
+Block Aliases Make Styling Readable
+@end
+
+@style(name="callout")
+This block uses the `callout` alias defined above.
+@end
+@end
+
+@style(class="subtle")
+Raw CSS:
+@end
+
+@code(lang="dcz")
+@css
+.badge { display:inline-block; padding:.15rem .5rem; border-radius:.375rem; background:#eef; color:#225; }
+.k { color:#0a7; text-decoration:underline dotted; }
+@end
+@end
+
+## 4.7 Media (Images)
+
+Embed images and other media. The exporter currently emits `<img>` for images.
+
+@code(lang="dcz")
+@media(src="./img/diagram.png" alt="Architecture Diagram" title="System Overview")
+@end
+@end
+
+@style(class="note")
+- Additional attributes may be added over time (e.g., `width`, `height`, `loading`, `decoding`).  
+- For video or audio, prefer raw HTML tags until dedicated directives land.
+@end
+
+## 4.8 Document Metadata (Head)
+
+Set document‑level metadata once; exporters map these into `<title>` and `<meta>` tags, and may also inject default CSS.
+
+@code(lang="dcz")
+@meta(
+  title="Docz Spec — Block Directives",
+  author="Docz Authors",
+  description="Canonical examples for block directives in Docz",
+  default_css="docz.core.css"
+)
+@end
+@end
+
+## 4.9 Imports (Stylesheets and Assets)
+
+Import external CSS (or other assets) that should be linked from the document head.
+
+@code(lang="dcz")
+@import(href="/styles/site.css")
+@end
+@end
+
+@style(class="note")
+- `@import(href="...")` becomes `<link rel="stylesheet" href="...">` in HTML.  
+- Prefer `@css` for small snippets; use `@import` for large or shared stylesheets.
+@end
+
+## 4.10 Nesting and Composition
+
+Blocks can be nested to achieve complex layout while keeping content readable.
+
+@code(lang="dcz")
+@style(class="prose")
+# A Styled Section
+
+@style(name="callout")
+Remember: block directives compose. You can nest `@style` around `@code` or `@math`.
+@end
+
+@code(lang="bash")
+zig build run -- run ./docs/SPEC.dcz
+@end
+
+@math
+\\text{Signal}(t) = A \\cdot \\sin(2\\pi f t + \\varphi)
+@end
+@end
+@end
+
+## 4.11 Normalization (Explicit Form)
+
+Use the CLI to convert shorthand to explicit form for canonical storage or automated tooling.
+
+@code(lang="bash")
+docz convert input.dcz --explicit > canonical.dcz
+@end
+
+@style(class="note")
+This normalization step is optional but recommended for large docs, CI, or when using Docz as an interchange format for tools.
+@end
+
+## 4.12 Common Pitfalls
+
+@style(class="prose")
+- Don’t mix Markdown triple‑backticks for code; always use `@code(lang="...")`.  
+- Leave a blank line between paragraphs.  
+- Prefer `class` for Tailwind/utility workflows; use `style` for one‑off CSS.  
+- Put global style aliases in a single `@style(mode="global")` block near the top of the document.  
+- KaTeX is display‑only; see Section 7 for trusted commands if you plan to style inside math.
+@end
+
+
+@meta(title="Docz Spec — Section 5: Inline Constructs", author="Docz Authors")
+
+# 5. Inline Constructs
+
+Inline constructs let you style and enrich text *without* breaking the paragraph flow.  
+Docz supports Markdown‑style emphasis, inline code, links, inline math, and inline `@style` spans.
+
+## 5.1 Emphasis, Strong, Code, Links
+
+This is *emphasis*, this is **strong**, and this is `inline code` inside a sentence.  
+Links use Markdown shorthand: [Zig](https://ziglang.org).
+
+## 5.2 Inline Math
+
+Inline math is recognized by KaTeX delimiters and rendered at runtime:
+
+- Newton's 2nd law: $F = ma$
+- Binomial: $(a+b)^2 = a^2 + 2ab + b^2$
+
+> Tip: For *display* math, use a `@math ... @end` block (see Section 4.4).
+
+## 5.3 Inline Styling with @style
+
+Use `@style(...) ... @end` to decorate *part* of a sentence.
+
+- Tailwind-style classes (if Tailwind is linked), or any CSS class names:
+  Energy is @style(class="font-semibold text-blue-600") important @end in physics.
+
+- Raw CSS via the `style` attribute (works with or without Tailwind):
+  Colors can suggest roles: @style(style="color:#16a34a; text-decoration:underline") success @end vs. @style(style="color:#dc2626") failure @end.
+
+- Combine with other inline features safely:
+  You can **bold** @style(class="px-1 rounded bg-yellow-100") highlighted @end words and add `code` in the same sentence.
+
+## 5.4 Interaction Hooks (HTML-like)
+
+With actions enabled, you can attach HTML-like event hooks to inline spans:
+
+@style(class="cursor-pointer underline" on-click="showNote('energy')")
+Click for a quick note on energy
+@end
+ — see Section 8 for configuring handlers (plain JS or WASM-backed).
+
+## 5.5 Inline vs Math Styling
+
+Inside *math content*, use KaTeX’s safe HTML helpers (enabled by Docz) instead of `@style`:
+
+@math
+\class{varE}{E} = \class{varm}{m}\class{varc}{c}^{2}
+@end
+
+Then style those classes in CSS:
+
+@css
+.varE { color: #ca8a04; }   /* amber */
+.varm { color: #16a34a; }   /* green */
+.varc { color: #2563eb; }   /* blue  */
+@end
+
+> Why? `@style` is parsed by Docz in prose, not inside KaTeX. KaTeX renders math to HTML; we rely on `\class{...}{...}` there.
+
+## 5.6 Do/Don’t
+
+- **Do** keep inline spans small and purposeful.  
+- **Do** prefer `class` when using a theme; use `style` for quick one-offs.  
+- **Don’t** try to nest `@style` *inside* `$...$` or `@math`; use `\class{}` instead.
+
+---
+
+That’s it for inline constructs. Next: lists, blockquotes, and structural flow.
+
+
+@meta(title="Docz Spec — Section 6: Metadata, Imports & Head", author="Docz Authors")
+
+# 6. Metadata, Imports & Head
+
+Docz exposes a small set of **document-scoped primitives** that compile into the HTML `<head>`:
+- `@meta` — declarative metadata (title, author, etc.).
+- `@import(href=...)` — link external stylesheets.
+- `@css ... @end` — embed raw CSS into a single `<style>` block.
+- `@style(mode="global") ... @end` — declare **style aliases** (names → class lists) that you can reuse via inline `@style`.
+
+These map cleanly to HTML and keep the body free of presentational noise.
+
+## 6.1 Meta
+
+Use `@meta` to set document metadata. Unrecognized keys are passed through as `<meta name="...">` pairs.
+
+@code(lang="dcz")
+@meta(
+  title="Physics Notes",
+  author="Ada Lovelace",
+  description="Compact notes on energy and mass–energy equivalence",
+  default_css="/styles/site.css"  # optional: add a baseline stylesheet link
+)
+@end
+
+- `title` → `<title>`
+- any other key (e.g. `author`, `description`) → `<meta name="…" content="…">`
+- `default_css` adds a `<link rel="stylesheet" href="…">` after any explicit `@import` links
+
+## 6.2 Importing external CSS
+
+Link stylesheets you ship alongside the HTML:
+
+@code(lang="dcz")
+@import(href="/styles/site.css")
+@end
+
+Compiles to:
+@code(lang="text")
+<link rel="stylesheet" href="/styles/site.css">
+@end
+
+> Tip: The CLI already writes/links `docz.core.css`. If a Tailwind theme is present, it will also be linked automatically as `docz.tailwind.css`.
+
+## 6.3 Inserting raw CSS into <head>
+
+For small customizations that don’t deserve a separate file, embed a `@css` block.
+
+@code(lang="dcz")
+@css
+/* Doc-specific tweaks */
+.katex { font-size: 1.04em; }
+.note  { background: #fffbcc; padding: .75rem; border-radius: .5rem; }
+@end
+@end
+
+All `@css` blocks are concatenated (in order) into a single `<style>` tag in the `<head>`.
+
+## 6.4 Declaring reusable style aliases
+
+Use `@style(mode="global")` to define **aliases** once, then reference them by name. Each line is `alias: space-separated-classes`.
+
+@code(lang="dcz")
+@style(mode="global")
+# Alias → classes (Tailwind-friendly or plain CSS classes)
+heading-1: text-3xl font-bold tracking-tight
+muted: text-gray-600
+btn: inline-flex items-center gap-2 px-3 py-1.5 rounded-md bg-blue-600 text-white hover:bg-blue-700
+@end
+@end
+
+You can then apply an alias in the body with an inline `@style`:
+
+@code(lang="dcz")
+@style(class="heading-1") Energy Basics @end
+
+A paragraph with @style(class="muted") subtle emphasis @end continues here.
+@end
+
+Or resolve an alias explicitly by name (equivalent to `class="…"`, but a bit more self-documenting):
+
+@code(lang="dcz")
+@style(name="btn") Read more @end
+@end
+
+> Resolution rules (inline `@style`): if `class="..."` is present it wins; else if `name="..."` is present it resolves via aliases; else if `style="..."` is present inline styles are used.
+
+## 6.5 Putting it together
+
+A minimal head setup with all three approaches:
+
+@code(lang="dcz")
+@meta(title="Sample", author="Docz Team", default_css="/styles/base.css")
+
+@import(href="/styles/print.css")
+
+@css
+pre code { font-size: .95em; }
+.endnote { color: #666; }
+@end
+
+@style(mode="global")
+lead: text-lg
+figure: my-6
+@end
+@end
+
+Now the body can stay clean and declarative while the head packs all global styling decisions.
+
+
+@meta(title="Docz Spec — Section 7", section="7", name="Styling & Themes")
+
+# 7. Styling & Themes
+
+Docz outputs **standard HTML** and ships with sensible, readable defaults. From there you can style documents in three layers:
+
+1) **Core CSS** — `docz.core.css` is always linked first.  
+2) **Your CSS** — via `@css ... @end` or a user stylesheet.  
+3) **Theme CSS (optional)** — Tailwind theme, if present, is linked last among stylesheets so utilities can layer on top of the core.
+
+> In short: **you can use plain CSS _or_ Tailwind utilities**. Docz does not require Tailwind, but will use it when discovered.
+
+## 7.1 Core CSS
+
+`docz.core.css` establishes a clean, readable baseline (typography, spacing, code block defaults, etc.).  
+It’s injected automatically by the CLI and requires no configuration.
+
+Example (no action required, shown for clarity):
+
+@code(lang="text")
+<link rel="stylesheet" href="docz.core.css">
+@end
+
+## 7.2 Your Global CSS with `@css`
+
+Use `@css ... @end` anywhere in the document to add global CSS rules.  
+These are emitted into the page `<head>` in document order.
+
+@css()
+/* A light callout style */
+.callout {
+  padding: .75rem 1rem;
+  border-left: 4px solid #60a5fa; /* blue-400 */
+  background: #f0f9ff;
+}
+
+/* A helper for subtle glow on hover */
+.hover-glow:hover {
+  box-shadow: 0 0 .5rem rgba(255, 255, 0, .6);
+}
+@end
+
+You can define as many `@css` blocks as you like; they are concatenated in order.
+
+## 7.3 Inline Styling with `@style` (explicit)
+
+Use `@style` to wrap content with a `span` (inline) or `div` (block) that carries attributes you provide.
+
+- `class="..."` — class list (works with plain CSS classes or Tailwind utilities)
+- `style="..."` — inline CSS style string
+- `id="..."`, `data-*="..."` — passed through
+- `on-...="..."` — interaction hooks (see §8)
+
+### Inline example (explicit)
+
+The mass term is @style(class="underline text-blue-700") m @end in $E = mc^2$.
+
+### Block example (explicit)
+
+@style(class="callout")
+This text uses the `.callout` class defined above.
+It spans multiple lines.
+@end
+
+> **Tip:** prefer `class="..."` when using utilities or named classes, and `style="..."` for quick one‑offs.
+
+## 7.4 Styling Shorthand `@(...) { ... }`
+
+For concise in‑line styling, you can use the shorthand form:
+
+- One‑line inline: `@(<attrs>){<text>}`
+- Multi‑line: `@(<attrs>)` on its own line, then content, then `@end`
+
+### One‑liner
+
+@(class="text-green-600 font-semibold"){Limes are green}
+
+### Multi‑line
+
+@(class="callout hover-glow")
+Hover me to see a subtle glow.
+@end
+
+Shorthand is **exactly equivalent** to the explicit `@style(...) ... @end` form.
+
+## 7.5 Tailwind Mode (optional)
+
+If a Tailwind theme is discovered (vendored or monorepo build), Docz links `docz.tailwind.css` _after_ `docz.core.css`.  
+When present, you can use any Tailwind utility in `class="..."` without additional setup.
+
+Examples (work when Tailwind is available; otherwise they are harmless no‑ops):
+
+- `@(class="prose prose-zinc") { Paragraphs render with readable typography }`
+- `@(class="text-sm md:text-base lg:text-lg"){Responsive text}`
+- `@(class="bg-amber-50 border-l-4 border-amber-400 p-3 rounded"){Warning banner}`
+
+> **Degrades gracefully:** if Tailwind is missing, unknown classes are simply ignored by the browser. Your document remains readable thanks to the core CSS.
+
+## 7.6 Ordering & Specificity
+
+Docz links styles in this order:
+
+1. `docz.core.css`
+2. Your user stylesheet (when `--css file` is used)
+3. `docz.tailwind.css` (if discovered)
+4. Inline `<style>` from `@css` blocks (in document order)
+
+This ensures utilities and your custom rules can override baseline defaults when needed.
+
+## 7.7 Data Attributes & IDs
+
+`@style` transparently passes through `id="..."` and any `data-*="..."`. Use these for scripted behavior or targeted CSS.
+
+Example:
+
+@css()
+/* emphasize any element marked as data-important */
+[data-important="true"] { outline: 2px dashed #f59e0b; /* amber-500 */ }
+@end
+
+@(class="p-2 rounded" id="energy-definition" data-important="true"){Energy (E) is the capacity to do work.}
+
+## 7.8 Accessibility Notes
+
+- Prefer semantic HTML where possible (use headings, lists, and tables appropriately).  
+- When using `@style` to simulate UI controls, ensure keyboard focus styles are visible and add ARIA roles if needed.  
+- Keep color contrast high; utilities like `text-zinc-800` on `bg-white` are a safe baseline.
+
+---
+
+**Recap:** Start with the built‑in core CSS, add your own `@css` rules, and (optionally) lean on Tailwind utilities via `class="..."`. Use `@style` (or `@(...)` shorthand) to apply styles inline or in blocks without losing readability.
+
+
+@meta(title="Docz Spec — Section 8: Interactivity & Actions", author="Docz Authors")
+
+# 8. Interactivity & Actions
+
+Docz supports interaction at **two levels**:
+
+1. **Pure HTML/CSS**: hover/focus/active states, `<details>` disclosure, `<dialog>` modals, etc. (works with or without TailwindCSS).
+2. **Actions (`on-*`)**: declarative event hooks such as `on-click`, `on-hover`, `on-keydown` that can be **progressively enhanced** by JavaScript or bound to **WASM exports** when WASM mode is enabled.
+
+The same markup is valid in both modes. With WASM disabled, the document remains fully readable and styleable; with WASM enabled, handlers run in a sandbox.
+
+---
+
+## 8.1 CSS‑only interactions
+
+Use CSS (or Tailwind utilities if enabled) to style hover/focus states. This works everywhere and requires no script.
+
+@style(mode="global")
+/* Classic CSS example */
+.button {
+  display: inline-block;
+  padding: 0.5rem 0.9rem;
+  border-radius: 0.5rem;
+  background: #111827;
+  color: white;
+  transition: transform 120ms ease, filter 120ms ease;
+}
+.button:hover { filter: brightness(1.1); }
+.button:active { transform: translateY(1px) scale(0.99); }
+
+/* Tailwind-friendly aliases (if Tailwind is linked) */
+.tw-btn { @apply inline-block px-3 py-2 rounded-lg bg-gray-900 text-white transition; }
+.tw-btn:hover { @apply brightness-110; }
+.tw-btn:active { transform: translateY(1px) scale(0.99); }
+@end
+
+@style(class="button") Hover me — CSS only. @end
+
+@style(class="tw-btn") Tailwind-flavored hover. @end
+
+`<details>` is a great no‑JS pattern:
+
+<details>
+  <summary>More context (click to expand)</summary>
+  This disclosure works without JavaScript or WASM.
+</details>
+
+---
+
+## 8.2 Actions with `on-*` attributes
+
+Actions annotate elements with **declarative events**. In CSS‑only mode these are emitted as `data-on-...` attributes (no behavior).  
+When a runtime is present (preview server or WASM), handlers are **automatically bound**.
+
+@style(class="button" on-click="sayHello") Click me @end
+
+Behavior:
+- **No runtime** → renders as `<span class="button" data-on-click="sayHello">…</span>` (no click effect).
+- **Runtime present** → binds `click` to handler named `sayHello` (JS or WASM export).
+
+Attributes supported on `@style` and block wrappers:
+- `class`, `style`
+- `id`, `role`, `tabindex`, any `aria-*`
+- `on-click`, `on-dblclick`, `on-input`, `on-change`, `on-hover`, `on-mouseenter`, `on-mouseleave`, `on-keydown`, `on-submit` (and other DOM‑standard names)
+
+---
+
+## 8.3 Progressive enhancement example (no WASM required)
+
+We annotate for actions, then (optionally) enhance with minimal JS. In Docz preview the tiny bridge auto‑binds `data-on-click` to global functions.
+
+@style(class="button" id="pe-demo" on-click="togglePE") Toggle me (PE) @end
+@style(id="pe-state") Current state: OFF @end
+
+@code(lang="html")
+<!-- Optional enhancement (outside of Docz core): -->
+<script>
+  // This is only illustrative. In WASM mode you'd bind to an exported function instead.
+  function togglePE(ev) {
+    var s = document.getElementById('pe-state');
+    s.textContent = s.textContent.includes('OFF') ? 'Current state: ON' : 'Current state: OFF';
+  }
+  // If your environment does not auto-bind, do:
+  // document.getElementById('pe-demo').addEventListener('click', togglePE);
+</script>
+@end
+
+---
+
+## 8.4 Counter UI wired for WASM
+
+Markup stays the same; handlers are names of **exported functions** in your active WASM module (e.g., Zig).
+
+@style(id="counter", class="font-mono") 0 @end
+
+@style(class="button" on-click="inc") + @end
+@style(class="button" on-click="dec") – @end
+@style(class="button" on-click="reset") Reset @end
+
+@code(lang="zig")
+// Pseudocode/shape of Zig WASM exports (exact bridge varies by runtime):
+export fn inc() void { /* read #counter, ++, write back */ }
+export fn dec() void { /* read #counter, --, write back */ }
+export fn reset() void { /* set to 0 */ }
+@end
+
+> **Note:** Docz’s preview server can provide a default bridge that calls exported WASM functions by name. Production sites can supply their own binder.
+
+---
+
+## 8.5 Interactive math (KaTeX + CSS + actions)
+
+Use KaTeX’s `\class` (alias of `\htmlClass`) to add semantic spans, then style or attach actions.  
+Docz enables `\class` safely via KaTeX’s `trust` whitelist.
+
+@style(mode="global")
+.var { transition: color 120ms ease, text-decoration-color 120ms ease; cursor: help; }
+.var:hover { color: #f59e0b; text-decoration: underline; text-decoration-color: #f59e0b; }
+.dialog {
+  border: none; border-radius: 10px; padding: 1rem 1.25rem;
+  box-shadow: 0 15px 40px rgba(0,0,0,0.2);
+}
+@end
+
+@math
+\class{var e}{E} = \class{var m}{m}\,\class{var c}{c}^{2}
+@end
+
+@style(class="button" on-click="explain('e')") What is E? @end
+@style(class="button" on-click="explain('m')") What is m? @end
+@style(class="button" on-click="explain('c')") What is c? @end
+
+<dialog id="var-dialog" class="dialog"></dialog>
+
+@code(lang="html")
+<script>
+  // Vanilla enhancement. In WASM mode, implement `explain` in Zig and call into the DOM via the bridge.
+  function explain(symbol) {
+    var text = {
+      'e': 'E is energy (joules).',
+      'm': 'm is mass (kilograms).',
+      'c': 'c is the speed of light (~3e8 m/s).'
+    }[symbol] || 'Unknown symbol.';
+    var d = document.getElementById('var-dialog');
+    d.textContent = text;
+    if (!d.open) d.showModal();
+  }
+</script>
+@end
+
+---
+
+## 8.6 Shorthand action syntax
+
+Inline one‑liner:
+@(class="button" on-click="openModal"){Open dialog}
+
+Multiline:
+@(class="card" on-hover="highlight")
+This block is hover‑highlighted and clickable in enhanced contexts.
+@end
+
+Both expand to explicit `@style(...) ... @end` and degrade gracefully without JS/WASM.
+
+---
+
+## 8.7 Accessibility & semantics
+
+Prefer semantic elements and usable fallbacks:
+- Add `role="button"` and `tabindex="0"` when a `@style` wrapper behaves like a button.
+- Pair `on-keydown="activateOnEnter"` with `on-click="activate"` for keyboard access.
+- Use real `<button>`, `<a>`, `<details>`, `<dialog>` where appropriate.
+
+@style(class="button" role="button" tabindex="0" on-click="activate" on-keydown="activateOnEnter")
+Accessible action
+@end
+
+---
+
+## 8.8 Security model (summary)
+
+- `on-*` attributes are data‑only in the HTML (`data-on-click`, etc.).
+- A binder (JS or WASM bridge) reads those and attaches listeners.
+- KaTeX rendering allows only a safe subset (`\class`, `\htmlClass`, `\htmlStyle`, `\color`, etc.).
+- No inline script execution is allowed through math or directives.
+
+That’s it — write once, view everywhere; progressively enhance when you need behavior.
+
+
+@meta(title="Docz Spec — Section 9: Extensibility & Plugins", author="Docz Authors")
+
+# 9. Extensibility & Plugins
+
+Docz is designed to grow. The core covers common needs (headings, paragraphs, lists, math, code, styling), while **plugins** provide everything else — tables, graphs, diagrams, domain widgets, and organization‑specific blocks — without complicating the language.
+
+## 9.1 Goals
+
+- **Uniform surface:** every capability looks like a directive: `@name(...) ... @end`.
+- **Deterministic output:** plugin rendering must be pure with respect to inputs (document, attrs, content, assets).
+- **Portable HTML+CSS(+WASM):** output stays framework‑agnostic and cacheable.
+- **Secure-by-default:** no implicit script execution; WASM/JS opt‑in and sandboxed.
+- **Toolable:** directives are explicit, so indexing, linting, and conversion (`--explicit`) remain reliable.
+
+## 9.2 What counts as a plugin?
+
+A plugin can provide one or more of:
+
+- **Custom directives** (block or inline), e.g. `@table`, `@graph`, `@badge`.
+- **Head assets** (CSS, fonts, optional JS bridges), linked not inlined.
+- **Action handlers** for `on-click`, `on-hover`, … when WASM/JS is enabled.
+- **Importers/exporters** (e.g. CSV → table rows), if the pipeline opts in.
+
+## 9.3 Directive lifecycle (high level)
+
+1. **Tokenize → Parse:** `@name(attrs) ... @end` becomes an AST node: `{ name, attributes, content, span }`.
+2. **Dispatch:** the renderer looks up `name` in the **directive registry**.
+3. **Render:** the registered handler receives `(attributes, content, context)` and emits HTML nodes + optional head links.
+4. **Finalize:** head links are deduplicated; CSS may be inlined or externalized based on build flags.
+
+Unknown directives are **non‑fatal by default**: content is passed through as plain text with a warning. Use `--strict` to make unknown/invalid directives an error.
+
+## 9.4 Attributes & content (types & rules)
+
+- Attributes are **string‑valued**: `key="value"`. Numbers/booleans are strings at the syntax level.
+- Attribute names are **lower‑kebab‑case** by convention: `data-source`, `row-gap`.
+- Repeated attributes: last write wins.
+- Block content is delivered as raw text (the plugin may parse its own grammar or delegate to Docz again).
+
+### Inline vs block
+
+- **Inline directives** must render to an inline element and are allowed inside paragraphs and headings.
+- **Block directives** must render to block-level elements and cannot appear where inline content is required.
+
+## 9.5 Namespacing & versioning
+
+To avoid collisions across ecosystems, plugins may be referenced by a **package name** and optional **namespace**:
+
+- Package identity in `docz.settings.json`:
+  @code(lang="json")
+  {
+    "plugins": [
+      "ztable@0.3.1",
+      "zgraph@0.2.0",
+      "acme.lab.badge@1.0.0"
+    ]
+  }
+  @end
+
+- Directive names should be short and readable: `@table`, `@graph`, `@badge`.
+- If two plugins define the same directive, the **first registered wins** (deterministic order = settings order).
+
+## 9.6 Assets: CSS, fonts, optional JS
+
+Plugins may ask Docz to add **head assets**:
+
+- CSS files (preferred) rather than inline style tags.
+- Web fonts (via CSS links).
+- Optional JS bridges (for actions or hydration).
+
+Docz deduplicates identical links and orders head assets as:
+
+1. **Core CSS** → 2. **User CSS (file mode)** → 3. **Tailwind theme (if present)** → 4. **Plugin CSS** → 5. **KaTeX** → 6. **Plugin JS bridges**.
+
+No inline `<script>` is injected by default; bridges are linked from `third_party/` or the project’s `themes/` folder.
+
+## 9.7 Tailwind integration (optional)
+
+If Tailwind is present, plugins can lean on utility classes. If Tailwind is absent, plugins must **provide baseline CSS** so documents still render acceptably.
+
+@style(class="note")
+Guideline: prefer semantic containers (`<table>`, `<figure>`, `<ul>`) and add classes that degrade well without Tailwind.
+@end
+
+## 9.8 WASM/JS actions
+
+Plugins can expose **action handlers** bound to `on-*` attributes (e.g. `on-click="toggleDetails"`).
+
+- At render time, Docz emits attributes as `data-on-click="toggleDetails"` (safe).
+- A runtime binder (JS or WASM shim) attaches event listeners when present.
+- With WASM enabled, handlers may be exported functions (e.g. Zig) and called via the binder.
+
+@code(lang="dcz")
+@style(class="button" on-click="incrementCounter")
+Click me
+@end
+@end
+
+The above renders to a `<button>` (or `<span role="button">`) with `data-on-click="incrementCounter"`. The binder maps that to `exports.incrementCounter()` when available.
+
+## 9.9 Security model
+
+- **No implicit script execution.** All actions are **data attributes** until a binder attaches.
+- **CSP‑friendly:** head assets are link tags; no `eval` or untrusted inline scripts.
+- **KaTeX trust:** only a safe subset (`\htmlClass`, `\htmlStyle`, `\htmlData`, `\textcolor`, `\underline`, …) is allowed; throw‑on‑error is disabled, but rendering is strict.
+
+## 9.10 Writing a custom directive (example: @badge)
+
+**User-facing syntax:**
+
+@code(lang="dcz")
+@badge(kind="info") Heads up — quiz on Friday. @end
+
+@badge(kind="warning") Compute budget almost exhausted. @end
+
+@badge(kind="success") Build completed in 2.1s. @end
+@end
+
+**Rendered HTML (simplified):**
+
+@code(lang="html")
+<span class="dz-badge dz-badge-info">Heads up — quiz on Friday.</span>
+<span class="dz-badge dz-badge-warning">Compute budget almost exhausted.</span>
+<span class="dz-badge dz-badge-success">Build completed in 2.1s.</span>
+@end
+
+**CSS (plugin-provided or theme):**
+
+@code(lang="css")
+.dz-badge { display:inline-block; padding:.125rem .375rem; border-radius:.25rem; font:600 12px/1 system-ui,sans-serif }
+.dz-badge-info { background:#e6f0ff; color:#1946a1 }
+.dz-badge-warning { background:#fff7e6; color:#8a4b00 }
+.dz-badge-success { background:#e6ffed; color:#065f46 }
+@end
+
+## 9.11 Table & graph plugins (built-ins by convention)
+
+### @table (ZTable)
+
+- Accepts `data` via rows in content, CSV, or a `src` attribute.
+- Supports `caption`, `head`, `align`, `row-class`, `on-row-click`, …
+
+@code(lang="dcz")
+@table(caption="Experiment Results", align="center")
+time, voltage, current
+0.0,  0.12,    0.03
+0.5,  0.18,    0.04
+1.0,  0.23,    0.05
+@end
+@end
+
+### @graph (ZGraph)
+
+- Accepts series as CSV, JSON, or inline rows.
+- Renders to `<svg>` with CSS‑driven theming; optional `on-click` per point.
+
+@code(lang="dcz")
+@graph(type="line" width="640" height="320" caption="Voltage over time")
+t, V
+0.0, 0.12
+0.5, 0.18
+1.0, 0.23
+@end
+@end
+
+## 9.12 Packaging & installation
+
+- **Discovery:** declare packages in `docz.settings.json` → Docz resolves to `third_party/<pkg>/<ver>/`.
+- **Verification:** checksums recorded in `third_party/VENDOR.lock` (see `tools/vendor.*`).
+- **Runtime:** renderer registers each plugin’s directives at startup.
+
+@code(lang="json")
+{
+  "plugins": [
+    "ztable@0.3.1",
+    "zgraph@0.2.0",
+    "acme.diagram@1.4.0"
+  ]
+}
+@end
+
+## 9.13 Editor support
+
+The Docz VSCode extension can read plugin manifests to provide:
+
+- Syntax highlighting for directive names.
+- Attribute completion (`kind=`, `type=`, `src=`…).
+- Snippets and quick docs (hover).
+
+## 9.14 Testing a plugin
+
+- **Golden tests:** feed `.dcz` → compare generated HTML and head assets.
+- **Round‑trip tests:** ensure `--explicit` preserves meaning.
+- **Accessibility checks:** ARIA roles, keyboard navigation, color contrast.
+
+@style(class="note")
+Tip: keep plugin outputs DOM‑small and CSS‑first; only hydrate when necessary. This maximizes portability and print‑friendliness.
+@end
+
+## 9.15 Error handling & diagnostics
+
+- Unknown attribute → warning (ignored), unless `--strict`.
+- Missing required attribute → error with span to source.
+- Malformed content → error with a minimal, readable recovery rendering.
+
+## 9.16 Summary
+
+- Plugins extend Docz with **new directives**, **assets**, and **actions** while preserving the language’s clarity.
+- Keep outputs **semantic and CSS‑first**, bind actions via **data attributes**, and rely on **WASM/JS bridges** only when needed.
+- Ship with **fallback CSS** so documents remain legible without Tailwind or JS.
+
+
+@meta(title="Docz Spec — Section 10: Math & KaTeX", author="Docz Authors")
+
+# 10. Math & KaTeX
+
+KaTeX renders LaTeX-style math to **pure HTML+CSS**, which makes it fast, portable, and styleable.
+Docz integrates KaTeX by default (when vendored assets are present) with inline `$...$` and block `@math ... @end`
+delimiters. The result is accessible markup you can **style and interact with** using normal Docz tools.
+
+## 10.1 Inline vs. Block
+
+- Inline math uses `$...$` (or `\(...\)`): energy is $E = mc^2$.
+- Display/block math uses the `@math` directive:
+
+@math
+\int_{-\infty}^{\infty} e^{-x^2} \, dx = \sqrt{\pi}
+@end
+
+## 10.2 Styling sub‑expressions (safe helpers)
+
+Docz enables a minimal, **whitelisted** set of KaTeX HTML helpers so you can wrap parts of an expression with classes,
+inline styles, or data attributes. These are enabled via the Docz KaTeX boot with a strict `trust` callback.
+
+- `\class{cls}{content}` → adds a CSS class (alias of `\htmlClass`).
+- `\htmlStyle{css}{content}` → adds inline style.
+- `\htmlData{key}{value}{content}` → adds `data-key="value"`.
+
+> These helpers are allowed specifically in Docz’s KaTeX config. They do **not** enable arbitrary HTML; they only produce
+> safe `<span>` wrappers around the math fragment.
+
+### Example (classes + Tailwind or plain CSS)
+
+@math
+\class{var-e}{E} = \class{var-m}{m}\class{var-c}{c}^{2}
+@end
+
+@style(class="note")
+If Tailwind is available, you can directly use utility classes, e.g.
+` \class{text-yellow-500 underline}{E} `. Without Tailwind, use your own CSS targeting `.var-e`, `.var-m`, etc.
+@end
+
+### Example (inline style)
+
+@math
+\htmlStyle{color:#eab308; text-decoration:underline}{E} = mc^{2}
+@end
+
+### Example (data attributes for behavior)
+
+@math
+\htmlData{info}{Energy}{\class{var-e}{E}} = \class{var-m}{m}\,\class{var-c}{c}^{2}
+@end
+
+Now you can attach behavior to `span[data-info]` (tooltips, modals) with `@script` (see §10.4).
+
+## 10.3 Accessible semantics
+
+- KaTeX emits accessible nodes; keep surrounding text descriptive.
+- If you add interactivity (click/hover), include ARIA roles and focus styles in your CSS or components.
+
+## 10.4 Interactivity (hover/click: tooltip + modal)
+
+Below is a small, dependency‑free pattern. It turns any `data-info` wrapped symbol into:
+- a CSS‑only tooltip on **hover/focus**
+- a small modal with richer content on **click**
+
+### Markup
+
+@math
+\htmlData{info}{Energy}{\class{var-e}{E}} = \htmlData{info}{mass}{\class{var-m}{m}}\,\class{var-c}{c}^{2}
+@end
+
+### Styles (tooltip + modal)
+
+@style(class="katex-interact-css")
+/* Hover/focus tooltip using the title-like attribute proxy */
+.kx-tip { position: relative; cursor: help; }
+.kx-tip:focus { outline: 2px solid #94a3b8; outline-offset: 2px; }
+.kx-tip[data-info]:hover::after,
+.kx-tip[data-info]:focus::after {
+  content: attr(data-info);
+  position: absolute;
+  left: 0; top: 100%;
+  white-space: nowrap;
+  background: #111; color: #fff;
+  padding: 2px 6px; border-radius: 4px;
+  transform: translateY(4px);
+  font-size: 12px; z-index: 10;
+}
+
+/* Minimal modal */
+.kx-modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,.45);
+  display: none; align-items: center; justify-content: center; z-index: 50;
+}
+.kx-modal-backdrop[data-open="true"] { display: flex; }
+.kx-modal {
+  width: min(92vw, 520px); background: #fff; color: #111;
+  border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.35);
+  padding: 16px 18px; font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+}
+.kx-modal h3 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+.kx-modal .close { float: right; cursor: pointer; font-size: 18px; line-height: 1; }
+@end
+
+### Behavior
+
+@script
+(function(){
+  // 1) Turn KaTeX spans with data-info into focusable, tooltip-enabled targets
+  document.querySelectorAll('.katex [data-info]').forEach(function(el){
+    el.classList.add('kx-tip');
+    el.tabIndex = 0;
+  });
+
+  // 2) Create one modal for the page
+  var backdrop = document.createElement('div');
+  backdrop.className = 'kx-modal-backdrop';
+  backdrop.innerHTML =
+    '<div class="kx-modal" role="dialog" aria-modal="true" aria-labelledby="kx-modal-title">' +
+      '<span class="close" aria-label="Close">×</span>' +
+      '<h3 id="kx-modal-title">Definition</h3>' +
+      '<div class="kx-modal-body"></div>' +
+    '</div>';
+  document.body.appendChild(backdrop);
+
+  var close = function(){ backdrop.setAttribute('data-open','false'); };
+  backdrop.addEventListener('click', function(ev){
+    // click outside closes
+    if (ev.target === backdrop) close();
+  });
+  backdrop.querySelector('.close').addEventListener('click', close);
+  document.addEventListener('keydown', function(ev){
+    if (ev.key === 'Escape') close();
+  });
+
+  // 3) Click handler: open modal with richer info
+  document.addEventListener('click', function(ev){
+    var el = ev.target.closest('.kx-tip[data-info]');
+    if (!el) return;
+
+    var key = el.getAttribute('data-info'); // e.g. "Energy", "mass"
+    var html = '';
+    if (key === 'Energy') {
+      html = '<p><strong>E</strong> denotes <em>Energy</em>. In special relativity, E = mc² relates mass and energy.</p>' +
+             '<p><small>Units: joules (J)</small></p>';
+    } else if (key === 'mass') {
+      html = '<p><strong>m</strong> denotes <em>mass</em>. It measures the amount of matter in a body.</p>' +
+             '<p><small>Units: kilograms (kg)</small></p>';
+    } else if (key === 'c') {
+      html = '<p><strong>c</strong> is the <em>speed of light</em>, approximately 299,792,458 m/s.</p>' +
+             '<p><small>Squared in E = mc² to reflect its role in energy equivalence.</small></p>';
+    } else {
+      html = '<p>'+key+'</p>';
+    }
+
+    backdrop.querySelector('.kx-modal-body').innerHTML = html;
+    backdrop.setAttribute('data-open','true');
+  });
+})();
+@end
+
+> **Note:** this example uses very small, local behavior for clarity.
+> For real projects, prefer extracting such modal/tooltip code into a reusable component or plugin.
+
+## 10.5 Working with macros
+
+Define macros inside a math block or via a document‑level macro directive (future). Inline definition example:
+
+@math
+\def\RR{\mathbb{R}}
+\def\vec#1{\boldsymbol{#1}}
+\vec{v} \in \RR^n
+@end
+
+## 10.6 Troubleshooting
+
+- If the helpers `\class`, `\htmlStyle`, or `\htmlData` don’t take effect, ensure Docz’s KaTeX boot is enabled
+  and configured with a **restrictive trust list** that includes those commands.
+- If you see raw TeX in the HTML, confirm the delimiters match the Docz config (see below).
+
+## 10.7 Docz KaTeX boot (reference)
+
+Docz injects KaTeX with a safe trust list. If you maintain a custom build or preview, ensure your initialization code
+looks like this (pseudocode of what Docz ships with):
+
+@code(lang="js")
+renderMathInElement(document.body, {
+  delimiters: [
+    {left: "$$", right: "$$", display: true},
+    {left: "$",  right: "$",  display: false},
+    {left: "\\(", right: "\\)", display: false},
+    {left: "\\[", right: "\\]", display: true}
+  ],
+  throwOnError: false,
+  trust: function (ctx) {
+    var cmd = ctx.command;
+    return cmd === "\\class"     || // alias of \htmlClass (Docz macro)
+           cmd === "\\htmlClass" ||
+           cmd === "\\htmlStyle" ||
+           cmd === "\\htmlData"  ||
+           cmd === "\\color"     ||
+           cmd === "\\textcolor" ||
+           cmd === "\\underline" ||
+           cmd === "\\boldsymbol"||
+           cmd === "\\boxed";
+  },
+  macros: {
+    "\\class": "\\htmlClass"
+  }
+});
+@end
+
+## 10.8 Complete worked example
+
+@style(class="prose")
+### Styling and interacting with \( E = mc^2 \)
+@end
+
+@style(class="flow")
+- Hover over **E** or **m** to see a tooltip.
+- Click either to open a small modal with more info.
+@end
+
+@math
+\htmlData{info}{Energy}{\class{var-e}{E}} =
+\htmlData{info}{mass}{\class{var-m}{m}}\,
+\htmlData{info}{c}{\class{var-c}{c}}^{2}
+@end
+
+@style(class="katex-demo-css")
+.var-e { color:#eab308; text-decoration: underline; text-decoration-thickness: 2px; }
+.var-m { color:#22c55e; }
+.var-c { color:#60a5fa; }
+.katex-display { margin: 0.6rem 0 1rem; }
+@end
+
+@style(class="footnote")
+_This demo uses only KaTeX + minimal CSS and a tiny script — no frameworks required._
+@end
+
+
+# DCZ SPEC — Addendum (Inline + HTML Export) — 2025-09-02 03:24 UTC
+
+> This addendum consolidates the **inline syntax**, **HTML exporter behavior**, and **CSS helpers**
+> we stabilized during implementation. It is **normative**: “MUST/SHOULD/MAY” are to be interpreted
+> per RFC 2119.
+
+## 1. Inline Syntax (Paragraph Transform)
+
+Inline rewrite is applied to `Content` paragraph nodes **after** tokenization and **before** HTML
+wrapping. The pass is **idempotent** and operates only on paragraph text (not raw HTML blocks).
+
+### 1.1 Backtick Code Spans
+- Single backtick-delimited spans are recognized: `` `like this` ``.
+- Backticks inside code are not allowed; use escaping (`\``).
+- Renderer **MUST** escape HTML special chars inside code spans.
+- Output: `<code>escaped</code>` (no class by default).
+
+### 1.2 Markdown Links
+- Form: `[text](url)`. Minimal validation: URL **MUST** contain at least one alpha and one of `. : /`.
+- Renderer **MUST** escape attribute value and text content.
+- Output: `<a href="...">text</a>`.
+- Non-URL cases are left unchanged.
+
+### 1.3 Inline Style Shorthand and Explicit Forms
+
+Two equivalent directives produce a `<span ...>...</span>` wrapper.
+
+#### 1.3.1 Shorthand
+```
+@(<key>=<value>, ...){{ body }}
+```
+or
+```
+@(<key>=<value>, ...) body @end
+```
+
+#### 1.3.2 Explicit
+```
+@style(<key>=<value>, ...){{ body }}
+```
+or
+```
+@style(<key>=<value>, ...) body @end
+```
+
+#### 1.3.3 Attribute Grammar
+Keys are case-insensitive. Values may be unquoted or double-quoted. Commas and/or spaces separate
+pairs. Recognized keys:
+
+- `name` — alias into style definitions (see §2).  
+- `class` / `classes` — CSS classes **or** (heuristic below) inline CSS.  
+- `style` — inline CSS.  
+- `on-click`, `on-hover`, `on-focus` — arbitrary strings, exported as `data-*` attributes.
+
+Unknown keys are ignored.
+
+#### 1.3.4 “class-as-CSS” Heuristic (Normative)
+If a `class`/`classes` value contains any of `:`, `;`, or `=`, treat it as **CSS**, not classes.  
+Effect: the value is appended to `style` (merging with a `; ` separator if both present).
+
+Examples:
+- `@style(class="color = red") preview @end` → `<span style="color = red">preview </span>`
+- `@(classes="font-bold underline"){{X}}` → `<span class="font-bold underline">X</span>`
+
+#### 1.3.5 Alias Resolution
+When `name` is present and maps to an alias defined in a `StyleDef` node, the alias resolves to
+the corresponding **class list** and is exported via the `class` attribute.
+
+Resolution order for the `<span>`:
+1. If `class`/`classes` is present and **does not** look like CSS → becomes `class="..."`.
+2. Else, if `name` resolves via aliases → becomes `class="resolved classes"`.
+3. If `class`/`classes` looks like CSS → merged into `style` (see 1.3.4).
+4. If `style` exists → becomes/extends `style="..."`.
+5. `on-*` keys → `data-on-*="..."`.
+
+All attribute values **MUST** be HTML-escaped for attributes.
+
+#### 1.3.6 Braced vs `@end` Bodies
+- `{{ ... }}` body supports nested braces inside quoted strings.
+- `... @end` form is scanned until `@end` **outside** quoted strings.
+- Inner body is inserted **as-is** (no extra escaping) to preserve KaTeX `$...$` fragments.
+
+### 1.4 KaTeX Compatibility
+Inline `$...$` math is **not** parsed by the inline pass; it is preserved verbatim for later KaTeX
+auto-render. Currency like `$4.39` is unaffected.
+
+---
+
+## 2. Style Aliases (`StyleDef`)
+
+Each top-level `StyleDef` node may define one or more alias→class mappings. The exporter builds a
+map of aliases once per document and uses it for §1.3.5.
+
+If a `StyleDef` node carries `{{ name: "note", classes: "rounded bg-yellow-50 px-2" }}`, then:
+```
+@(name="note"){{Nice}} → <span class="rounded bg-yellow-50 px-2">Nice</span>
+```
+
+---
+
+## 3. HTML Exporter (Public API)
+
+### 3.1 API
+- `exportHtml(doc: *const AST.ASTNode, A: Allocator) ![]u8` — returns a standalone HTML document.
+
+### 3.2 Responsibilities
+- Writes minimal HTML skeleton (`<!DOCTYPE html>`, `<html>`, `<head>`, `<body>`).
+- Emits blocks: `Heading`, `Content`, `CodeBlock`, `Math`, `Media`, `Style`, ignores `StyleDef`/`Css`
+  in-body (head injection MAY be handled elsewhere).
+- For each `Content` paragraph:
+  - Trim trailing whitespace.
+  - Apply **inline pass** (Section 1).
+  - Wrap in `<p>…</p>` **without** escaping the inline output again.
+- Preserve inline `$...$` for KaTeX.
+
+### 3.3 Heading Levels
+Heading nodes carry `attributes["level"]` (`"1"`..`"6"`). Default `"1"` when absent.
+
+### 3.4 Media
+`Media` nodes with `attributes["src"]` emit `<img src="..."/>` (no width/height enforced).
+
+---
+
+## 4. Exporter CSS Helpers
+
+These helpers are pure string transforms to support the CLI flows (bundle/inline).
+
+- `collectInlineCss(doc: *const AST.ASTNode, A: Allocator) ![]u8`  
+  Scans the document for CSS (from `Css` nodes and/or style assets decided by the caller) and
+  returns a single CSS string (no `<style>` wrapper).
+
+- `stripFirstStyleBlock(html: []const u8, A: Allocator) ![]u8`  
+  Removes the first `<style>…</style>` block from an HTML string. If none exists, returns the
+  original unchanged. Intended for “extract-then-externalize” pipelines.
+
+Both functions **MUST NOT** mutate the input slices.
+
+---
+
+## 5. Security / Escaping
+
+- Inline code and attribute values are HTML-escaped.  
+- Link `href` is attribute-escaped; minimal URL sanity check (see §1.2).  
+- Inline bodies are trusted author content; they are inserted without extra escaping to preserve
+  KaTeX and intended HTML (authors may still embed raw HTML when needed).
+
+---
+
+## 6. Conformance Tests (Summary)
+
+Inline tests (examples):
+- backticks + links + shorthand `@(...)`  
+- explicit `@style(...) ... @end` with class-as-CSS heuristic  
+- shorthand with quoted brace body  
+- dollar currency untouched
+
+Exporter tests (examples):
+- paragraph delegates to inline pass  
+- headings / code block / math block / media  
+- preserves inline `$...$`  
+- shorthand expansion to `<span class=…>`
+
+(See repo unit tests for exact expectations.)
+
+---
+
+## 7. Backward Compatibility Notes
+
+- The inline engine accepts both shorthand and explicit forms (1.3).  
+- Alias resolution is additive; unrecognized aliases have no effect.  
+- Heuristic (1.3.4) is intentionally minimal and deterministic.
+
+```

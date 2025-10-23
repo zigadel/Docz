@@ -1,0 +1,187 @@
+@meta(title="Docz Spec — Section 8: Interactivity & Actions", author="Docz Authors")
+
+# 8. Interactivity & Actions
+
+Docz supports interaction at **two levels**:
+
+1. **Pure HTML/CSS**: hover/focus/active states, `<details>` disclosure, `<dialog>` modals, etc. (works with or without TailwindCSS).
+2. **Actions (`on-*`)**: declarative event hooks such as `on-click`, `on-hover`, `on-keydown` that can be **progressively enhanced** by JavaScript or bound to **WASM exports** when WASM mode is enabled.
+
+The same markup is valid in both modes. With WASM disabled, the document remains fully readable and styleable; with WASM enabled, handlers run in a sandbox.
+
+---
+
+## 8.1 CSS‑only interactions
+
+Use CSS (or Tailwind utilities if enabled) to style hover/focus states. This works everywhere and requires no script.
+
+@style(mode="global")
+/* Classic CSS example */
+.button {
+  display: inline-block;
+  padding: 0.5rem 0.9rem;
+  border-radius: 0.5rem;
+  background: #111827;
+  color: white;
+  transition: transform 120ms ease, filter 120ms ease;
+}
+.button:hover { filter: brightness(1.1); }
+.button:active { transform: translateY(1px) scale(0.99); }
+
+/* Tailwind-friendly aliases (if Tailwind is linked) */
+.tw-btn { @apply inline-block px-3 py-2 rounded-lg bg-gray-900 text-white transition; }
+.tw-btn:hover { @apply brightness-110; }
+.tw-btn:active { transform: translateY(1px) scale(0.99); }
+@end
+
+@style(class="button") Hover me — CSS only. @end
+
+@style(class="tw-btn") Tailwind-flavored hover. @end
+
+`<details>` is a great no‑JS pattern:
+
+<details>
+  <summary>More context (click to expand)</summary>
+  This disclosure works without JavaScript or WASM.
+</details>
+
+---
+
+## 8.2 Actions with `on-*` attributes
+
+Actions annotate elements with **declarative events**. In CSS‑only mode these are emitted as `data-on-...` attributes (no behavior).  
+When a runtime is present (preview server or WASM), handlers are **automatically bound**.
+
+@style(class="button" on-click="sayHello") Click me @end
+
+Behavior:
+- **No runtime** → renders as `<span class="button" data-on-click="sayHello">…</span>` (no click effect).
+- **Runtime present** → binds `click` to handler named `sayHello` (JS or WASM export).
+
+Attributes supported on `@style` and block wrappers:
+- `class`, `style`
+- `id`, `role`, `tabindex`, any `aria-*`
+- `on-click`, `on-dblclick`, `on-input`, `on-change`, `on-hover`, `on-mouseenter`, `on-mouseleave`, `on-keydown`, `on-submit` (and other DOM‑standard names)
+
+---
+
+## 8.3 Progressive enhancement example (no WASM required)
+
+We annotate for actions, then (optionally) enhance with minimal JS. In Docz preview the tiny bridge auto‑binds `data-on-click` to global functions.
+
+@style(class="button" id="pe-demo" on-click="togglePE") Toggle me (PE) @end
+@style(id="pe-state") Current state: OFF @end
+
+@code(lang="html")
+<!-- Optional enhancement (outside of Docz core): -->
+<script>
+  // This is only illustrative. In WASM mode you'd bind to an exported function instead.
+  function togglePE(ev) {
+    var s = document.getElementById('pe-state');
+    s.textContent = s.textContent.includes('OFF') ? 'Current state: ON' : 'Current state: OFF';
+  }
+  // If your environment does not auto-bind, do:
+  // document.getElementById('pe-demo').addEventListener('click', togglePE);
+</script>
+@end
+
+---
+
+## 8.4 Counter UI wired for WASM
+
+Markup stays the same; handlers are names of **exported functions** in your active WASM module (e.g., Zig).
+
+@style(id="counter", class="font-mono") 0 @end
+
+@style(class="button" on-click="inc") + @end
+@style(class="button" on-click="dec") – @end
+@style(class="button" on-click="reset") Reset @end
+
+@code(lang="zig")
+// Pseudocode/shape of Zig WASM exports (exact bridge varies by runtime):
+export fn inc() void { /* read #counter, ++, write back */ }
+export fn dec() void { /* read #counter, --, write back */ }
+export fn reset() void { /* set to 0 */ }
+@end
+
+> **Note:** Docz’s preview server can provide a default bridge that calls exported WASM functions by name. Production sites can supply their own binder.
+
+---
+
+## 8.5 Interactive math (KaTeX + CSS + actions)
+
+Use KaTeX’s `\class` (alias of `\htmlClass`) to add semantic spans, then style or attach actions.  
+Docz enables `\class` safely via KaTeX’s `trust` whitelist.
+
+@style(mode="global")
+.var { transition: color 120ms ease, text-decoration-color 120ms ease; cursor: help; }
+.var:hover { color: #f59e0b; text-decoration: underline; text-decoration-color: #f59e0b; }
+.dialog {
+  border: none; border-radius: 10px; padding: 1rem 1.25rem;
+  box-shadow: 0 15px 40px rgba(0,0,0,0.2);
+}
+@end
+
+@math
+\class{var e}{E} = \class{var m}{m}\,\class{var c}{c}^{2}
+@end
+
+@style(class="button" on-click="explain('e')") What is E? @end
+@style(class="button" on-click="explain('m')") What is m? @end
+@style(class="button" on-click="explain('c')") What is c? @end
+
+<dialog id="var-dialog" class="dialog"></dialog>
+
+@code(lang="html")
+<script>
+  // Vanilla enhancement. In WASM mode, implement `explain` in Zig and call into the DOM via the bridge.
+  function explain(symbol) {
+    var text = {
+      'e': 'E is energy (joules).',
+      'm': 'm is mass (kilograms).',
+      'c': 'c is the speed of light (~3e8 m/s).'
+    }[symbol] || 'Unknown symbol.';
+    var d = document.getElementById('var-dialog');
+    d.textContent = text;
+    if (!d.open) d.showModal();
+  }
+</script>
+@end
+
+---
+
+## 8.6 Shorthand action syntax
+
+Inline one‑liner:
+@(class="button" on-click="openModal"){Open dialog}
+
+Multiline:
+@(class="card" on-hover="highlight")
+This block is hover‑highlighted and clickable in enhanced contexts.
+@end
+
+Both expand to explicit `@style(...) ... @end` and degrade gracefully without JS/WASM.
+
+---
+
+## 8.7 Accessibility & semantics
+
+Prefer semantic elements and usable fallbacks:
+- Add `role="button"` and `tabindex="0"` when a `@style` wrapper behaves like a button.
+- Pair `on-keydown="activateOnEnter"` with `on-click="activate"` for keyboard access.
+- Use real `<button>`, `<a>`, `<details>`, `<dialog>` where appropriate.
+
+@style(class="button" role="button" tabindex="0" on-click="activate" on-keydown="activateOnEnter")
+Accessible action
+@end
+
+---
+
+## 8.8 Security model (summary)
+
+- `on-*` attributes are data‑only in the HTML (`data-on-click`, etc.).
+- A binder (JS or WASM bridge) reads those and attaches listeners.
+- KaTeX rendering allows only a safe subset (`\class`, `\htmlClass`, `\htmlStyle`, `\color`, etc.).
+- No inline script execution is allowed through math or directives.
+
+That’s it — write once, view everywhere; progressively enhance when you need behavior.

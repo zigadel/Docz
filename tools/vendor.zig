@@ -6,7 +6,7 @@ pub fn main() !void {
     const A = gpa.allocator();
 
     var it = try std.process.argsWithAllocator(A);
-    defer it.deinit();
+    defer it.deinit(A);
     _ = it.next(); // program name
 
     const cmd = it.next() orelse return usage();
@@ -47,31 +47,46 @@ fn usage() !void {
 }
 
 // ─────────────────────────────────────────────────────────────
-// HTTP / IO helpers
+// tiny IO helpers
 // ─────────────────────────────────────────────────────────────
 
-fn httpGetToFile(A: std.mem.Allocator, url: []const u8, dest_abs: []const u8) !void {
-    // Ensure parent dir exists
+fn slurpFile(a: std.mem.Allocator, path: []const u8, max: usize) ![]u8 {
+    var f = try std.fs.cwd().openFile(path, .{});
+    defer f.close();
+    var out = std.ArrayList(u8){};
+    defer out.deinit(a);
+
+    var tmp: [32 * 1024]u8 = undefined;
+    var total: usize = 0;
+    while (true) {
+        const n = try f.read(&tmp);
+        if (n == 0) break;
+        total += n;
+        if (total > max) return error.FileTooLarge;
+        try out.appendSlice(a, tmp[0..n]);
+    }
+    return try out.toOwnedSlice(a);
+}
+
+fn httpGetToFile(a: std.mem.Allocator, url: []const u8, dest_abs: []const u8) !void {
     if (std.fs.path.dirname(dest_abs)) |d| try std.fs.cwd().makePath(d);
 
-    var client = std.http.Client{ .allocator = A };
-    defer client.deinit();
+    var client = std.http.Client{ .allocator = a };
+    defer client.deinit(a);
 
-    // Keep the current URL as a STRING so we can resolve relative Location headers.
-    var current_url = try A.dupe(u8, url);
-    defer A.free(current_url);
+    var current_url = try a.dupe(u8, url);
+    defer a.free(current_url);
 
     var redirects_left: u8 = 5;
 
     while (true) {
         const current = try std.Uri.parse(current_url);
 
-        // Your std requires a header buffer for parsed fields like .location
         var hdr_buf: [8 * 1024]u8 = undefined;
         var req = try client.open(.GET, current, .{
             .server_header_buffer = &hdr_buf,
         });
-        defer req.deinit();
+        defer req.deinit(a);
 
         try req.send();
         try req.finish();
@@ -81,7 +96,6 @@ fn httpGetToFile(A: std.mem.Allocator, url: []const u8, dest_abs: []const u8) !v
         const klass: u16 = code / 100;
 
         if (klass == 2) {
-            // Success → stream to file
             var out_file = try std.fs.cwd().createFile(dest_abs, .{ .truncate = true });
             defer out_file.close();
 
@@ -96,7 +110,6 @@ fn httpGetToFile(A: std.mem.Allocator, url: []const u8, dest_abs: []const u8) !v
             if (redirects_left == 0) return error.HttpFailed;
             redirects_left -%= 1;
 
-            // Prefer parsed field; fallback to iterating headers
             const loc = req.response.location orelse blk: {
                 var it = req.response.iterateHeaders();
                 while (it.next()) |h| {
@@ -105,9 +118,8 @@ fn httpGetToFile(A: std.mem.Allocator, url: []const u8, dest_abs: []const u8) !v
                 break :blk null;
             } orelse return error.HttpFailed;
 
-            // Build next absolute URL as a string, then loop
-            const next_url = try resolveRedirectAgainst(A, current_url, loc);
-            A.free(current_url);
+            const next_url = try resolveRedirectAgainst(a, current_url, loc);
+            a.free(current_url);
             current_url = next_url;
             continue;
         } else {
@@ -119,7 +131,6 @@ fn httpGetToFile(A: std.mem.Allocator, url: []const u8, dest_abs: []const u8) !v
 
 // ---------- helpers for redirect resolution (string-based) ----------
 
-// Return index just past the authority (scheme://host[:port]), or 0 if not found.
 fn originEndIndex(u: []const u8) usize {
     if (std.mem.indexOf(u8, u, "://")) |i| {
         const after_scheme = i + 3;
@@ -130,34 +141,29 @@ fn originEndIndex(u: []const u8) usize {
     return 0;
 }
 
-// Resolve `loc` (which may be absolute, "/abs", or path-relative) against `base_url` (string).
-fn resolveRedirectAgainst(A: std.mem.Allocator, base_url: []const u8, loc: []const u8) ![]u8 {
-    // Absolute if it contains a scheme separator before any slash
+fn resolveRedirectAgainst(a: std.mem.Allocator, base_url: []const u8, loc: []const u8) ![]u8 {
     if (std.mem.indexOf(u8, loc, "://") != null)
-        return A.dupe(u8, loc);
+        return a.dupe(u8, loc);
 
     const origin_end = originEndIndex(base_url);
     if (origin_end == 0) return error.BadBaseUrl;
 
-    // Case 1: "/absolute-path" → origin + loc
     if (loc.len > 0 and loc[0] == '/') {
         const origin = base_url[0..origin_end];
-        return std.fmt.allocPrint(A, "{s}{s}", .{ origin, loc });
+        return std.fmt.allocPrint(a, "{s}{s}", .{ origin, loc });
     }
 
-    // Case 2: path-relative → base directory + loc
-    // Find base directory end (last '/' after origin)
     var dir_end = origin_end;
     if (origin_end < base_url.len) {
         const path = base_url[origin_end..];
         if (std.mem.lastIndexOfScalar(u8, path, '/')) |ls| {
-            dir_end = origin_end + ls + 1; // include the slash
+            dir_end = origin_end + ls + 1;
         } else {
-            dir_end = origin_end; // no slash in path → treat as root
+            dir_end = origin_end;
         }
     }
     const before = base_url[0..dir_end];
-    return std.fmt.allocPrint(A, "{s}{s}", .{ before, loc });
+    return std.fmt.allocPrint(a, "{s}{s}", .{ before, loc });
 }
 
 fn copyFile(src_abs: []const u8, dest_abs: []const u8) !void {
@@ -190,49 +196,57 @@ fn fileExists(abs: []const u8) bool {
 }
 
 // ─────────────────────────────────────────────────────────────
-// KaTeX fetch (extracted helper + subcommand)
+// KaTeX fetch
 // ─────────────────────────────────────────────────────────────
 
-fn fetchKatex(A: std.mem.Allocator, ver: []const u8, manifest: []const u8, cdn: []const u8) !void {
-    const base = try std.fmt.allocPrint(A, "third_party/katex/{s}", .{ver});
-    defer A.free(base);
+fn fetchKatex(a: std.mem.Allocator, ver: []const u8, manifest: []const u8, cdn: []const u8) !void {
+    const base = try std.fmt.allocPrint(a, "third_party/katex/{s}", .{ver});
+    defer a.free(base);
 
     var mf = std.fs.cwd().openFile(manifest, .{}) catch |e| {
         std.debug.print("katex: manifest not found: {s} ({s})\n", .{ manifest, @errorName(e) });
         return e;
     };
     defer mf.close();
-    const mb = try mf.readToEndAlloc(A, 1 << 18);
-    defer A.free(mb);
+
+    var mb = std.ArrayList(u8){};
+    defer mb.deinit(a);
+    var tmp: [8 * 1024]u8 = undefined;
+    while (true) {
+        const n = try mf.read(&tmp);
+        if (n == 0) break;
+        try mb.appendSlice(a, tmp[0..n]);
+    }
+    const mb_slice = mb.items;
 
     var ok: usize = 0;
-    var itl = std.mem.splitScalar(u8, mb, '\n');
+    var itl = std.mem.splitScalar(u8, mb_slice, '\n');
     while (itl.next()) |raw| {
         const rel = std.mem.trim(u8, raw, " \t\r");
         if (rel.len == 0 or rel[0] == '#') continue;
 
         const url = switch (cdn[0]) {
-            'j' => try std.fmt.allocPrint(A, "https://cdn.jsdelivr.net/npm/katex@{s}/{s}", .{ ver, rel }),
-            'u' => try std.fmt.allocPrint(A, "https://unpkg.com/katex@{s}/{s}", .{ ver, rel }),
-            else => try std.fmt.allocPrint(A, "https://cdn.jsdelivr.net/npm/katex@{s}/{s}", .{ ver, rel }),
+            'j' => try std.fmt.allocPrint(a, "https://cdn.jsdelivr.net/npm/katex@{s}/{s}", .{ ver, rel }),
+            'u' => try std.fmt.allocPrint(a, "https://unpkg.com/katex@{s}/{s}", .{ ver, rel }),
+            else => try std.fmt.allocPrint(a, "https://cdn.jsdelivr.net/npm/katex@{s}/{s}", .{ ver, rel }),
         };
-        defer A.free(url);
+        defer a.free(url);
 
-        const dest = try std.fs.path.join(A, &.{ base, rel });
-        defer A.free(dest);
+        const dest = try std.fs.path.join(a, &.{ base, rel });
+        defer a.free(dest);
 
-        try httpGetToFile(A, url, dest);
+        try httpGetToFile(a, url, dest);
         ok += 1;
     }
 
-    const vfile = try std.fs.path.join(A, &.{ base, "VERSION" });
-    defer A.free(vfile);
+    const vfile = try std.fs.path.join(a, &.{ base, "VERSION" });
+    defer a.free(vfile);
     try writeTextFile(vfile, ver);
 
     std.debug.print("katex: fetched {d} files into {s}\n", .{ ok, base });
 }
 
-fn sub_fetch_katex(A: std.mem.Allocator, it: *std.process.ArgIterator) !void {
+fn sub_fetch_katex(a: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     const ver = it.next() orelse {
         std.debug.print("fetch katex: missing <version>, e.g. 0.16.11\n", .{});
         return error.Invalid;
@@ -261,34 +275,34 @@ fn sub_fetch_katex(A: std.mem.Allocator, it: *std.process.ArgIterator) !void {
         return error.Invalid;
     };
 
-    try fetchKatex(A, ver, manifest, cdn);
+    try fetchKatex(a, ver, manifest, cdn);
 }
 
 // ─────────────────────────────────────────────────────────────
-// Tailwind theme fetch (helper + subcommand)
+// Tailwind theme fetch
 // ─────────────────────────────────────────────────────────────
 
-fn fetchTailwindTheme(A: std.mem.Allocator, ver: []const u8, src: []const u8) !void {
-    const base = try std.fmt.allocPrint(A, "third_party/tailwind/docz-theme-{s}", .{ver});
-    defer A.free(base);
+fn fetchTailwindTheme(a: std.mem.Allocator, ver: []const u8, src: []const u8) !void {
+    const base = try std.fmt.allocPrint(a, "third_party/tailwind/docz-theme-{s}", .{ver});
+    defer a.free(base);
 
-    const dest = try std.fs.path.join(A, &.{ base, "css", "docz.tailwind.css" });
-    defer A.free(dest);
+    const dest = try std.fs.path.join(a, &.{ base, "css", "docz.tailwind.css" });
+    defer a.free(dest);
 
     if (std.mem.startsWith(u8, src, "http://") or std.mem.startsWith(u8, src, "https://")) {
-        try httpGetToFile(A, src, dest);
+        try httpGetToFile(a, src, dest);
     } else {
-        try copyFile(src, dest); // ← 2-arg version
+        try copyFile(src, dest);
     }
 
-    const vfile = try std.fs.path.join(A, &.{ base, "VERSION" });
-    defer A.free(vfile);
+    const vfile = try std.fs.path.join(a, &.{ base, "VERSION" });
+    defer a.free(vfile);
     try writeTextFile(vfile, ver);
 
     std.debug.print("tailwind: placed theme {s} -> {s}\n", .{ src, dest });
 }
 
-fn sub_fetch_tailwind_theme(A: std.mem.Allocator, it: *std.process.ArgIterator) !void {
+fn sub_fetch_tailwind_theme(a: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     const ver = it.next() orelse {
         std.debug.print("fetch tailwind-theme: missing <version>, e.g. 1.0.0\n", .{});
         return error.Invalid;
@@ -298,24 +312,7 @@ fn sub_fetch_tailwind_theme(A: std.mem.Allocator, it: *std.process.ArgIterator) 
         return error.Invalid;
     };
 
-    const base = try std.fmt.allocPrint(A, "third_party/tailwind/docz-theme-{s}", .{ver});
-    defer A.free(base);
-
-    const dest = try std.fs.path.join(A, &.{ base, "css", "docz.tailwind.css" });
-    defer A.free(dest);
-
-    if (std.mem.startsWith(u8, src, "http://") or std.mem.startsWith(u8, src, "https://")) {
-        try httpGetToFile(A, src, dest);
-    } else {
-        // NEW signature: no allocator param
-        try copyFile(src, dest);
-    }
-
-    const vfile = try std.fs.path.join(A, &.{ base, "VERSION" });
-    defer A.free(vfile);
-    try writeTextFile(vfile, ver);
-
-    std.debug.print("tailwind: placed theme {s} -> {s}\n", .{ src, dest });
+    try fetchTailwindTheme(a, ver, src);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -334,7 +331,7 @@ fn isIgnoredBase(b: []const u8) bool {
     return false;
 }
 
-fn walkFilesCollect(A: std.mem.Allocator, root_abs: []const u8, out: *std.ArrayList([]const u8)) !void {
+fn walkFilesCollect(a: std.mem.Allocator, root_abs: []const u8, out: *std.ArrayList([]const u8)) !void {
     var dir = try std.fs.cwd().openDir(root_abs, .{ .iterate = true });
     defer dir.close();
 
@@ -343,26 +340,26 @@ fn walkFilesCollect(A: std.mem.Allocator, root_abs: []const u8, out: *std.ArrayL
         const name = e.name;
         if (name.len == 0 or name[0] == '.') continue;
 
-        const abs = try std.fs.path.join(A, &.{ root_abs, name });
+        const abs = try std.fs.path.join(a, &.{ root_abs, name });
         switch (e.kind) {
             .file => {
-                if (!isIgnoredBase(name)) try out.append(abs) else A.free(abs);
+                if (!isIgnoredBase(name)) try out.append(a, abs) else a.free(abs);
             },
             .directory => {
-                try walkFilesCollect(A, abs, out);
-                A.free(abs);
+                try walkFilesCollect(a, abs, out);
+                a.free(abs);
             },
-            else => A.free(abs),
+            else => a.free(abs),
         }
     }
 }
 
-fn sha256HexOfFile(A: std.mem.Allocator, abs: []const u8) ![]u8 {
+fn sha256HexOfFile(a: std.mem.Allocator, abs: []const u8) ![]u8 {
     var f = try std.fs.cwd().openFile(abs, .{});
     defer f.close();
     const st = try f.stat();
-    const buf = try A.alloc(u8, @intCast(st.size));
-    defer A.free(buf);
+    const buf = try a.alloc(u8, @intCast(st.size));
+    defer a.free(buf);
     _ = try f.readAll(buf);
 
     var h = std.crypto.hash.sha2.Sha256.init(.{});
@@ -371,27 +368,27 @@ fn sha256HexOfFile(A: std.mem.Allocator, abs: []const u8) ![]u8 {
     var digest: [32]u8 = undefined;
     h.final(&digest);
 
-    return try bytesToHexLower(A, &digest);
+    return try bytesToHexLower(a, &digest);
 }
 
-fn writeChecksumsFor(A: std.mem.Allocator, base_abs: []const u8) !void {
-    var files = std.ArrayList([]const u8).init(A);
+fn writeChecksumsFor(a: std.mem.Allocator, base_abs: []const u8) !void {
+    var files = std.ArrayList([]const u8){};
     defer {
-        for (files.items) |p| A.free(p);
-        files.deinit();
+        for (files.items) |p| a.free(p);
+        files.deinit(a);
     }
-    try walkFilesCollect(A, base_abs, &files);
+    try walkFilesCollect(a, base_abs, &files);
     if (files.items.len == 0) return;
 
-    const outp = try std.fs.path.join(A, &.{ base_abs, "CHECKSUMS.sha256" });
-    defer A.free(outp);
+    const outp = try std.fs.path.join(a, &.{ base_abs, "CHECKSUMS.sha256" });
+    defer a.free(outp);
     var f = try std.fs.cwd().createFile(outp, .{ .truncate = true });
     defer f.close();
 
     const root_len = base_abs.len;
     for (files.items) |abs| {
-        const hex = try sha256HexOfFile(A, abs);
-        defer A.free(hex);
+        const hex = try sha256HexOfFile(a, abs);
+        defer a.free(hex);
 
         var rel: []const u8 = abs;
         if (abs.len > root_len + 1 and
@@ -401,25 +398,23 @@ fn writeChecksumsFor(A: std.mem.Allocator, base_abs: []const u8) !void {
             rel = abs[root_len + 1 ..];
         }
 
-        const line = try std.fmt.allocPrint(A, "{s}  {s}\n", .{ hex, rel });
-        defer A.free(line);
+        const line = try std.fmt.allocPrint(a, "{s}  {s}\n", .{ hex, rel });
+        defer a.free(line);
         try f.writeAll(line);
     }
 }
 
-fn verifyOne(A: std.mem.Allocator, base_abs: []const u8) !void {
-    const cpath = try std.fs.path.join(A, &.{ base_abs, "CHECKSUMS.sha256" });
-    defer A.free(cpath);
+fn verifyOne(a: std.mem.Allocator, base_abs: []const u8) !void {
+    const cpath = try std.fs.path.join(a, &.{ base_abs, "CHECKSUMS.sha256" });
+    defer a.free(cpath);
 
     if (!fileExists(cpath)) {
         std.debug.print("verify: skipped (no CHECKSUMS) {s}\n", .{base_abs});
         return;
     }
 
-    var f = try std.fs.cwd().openFile(cpath, .{});
-    defer f.close();
-    const buf = try f.readToEndAlloc(A, 1 << 22);
-    defer A.free(buf);
+    const buf = try slurpFile(a, cpath, 1 << 22);
+    defer a.free(buf);
 
     var ok: usize = 0;
     var tot: usize = 0;
@@ -435,15 +430,15 @@ fn verifyOne(A: std.mem.Allocator, base_abs: []const u8) !void {
         while (sp.len > 0 and (sp[0] == ' ' or sp[0] == '\t')) sp = sp[1..];
         const rel = sp;
 
-        const abs = try std.fs.path.join(A, &.{ base_abs, rel });
-        defer A.free(abs);
+        const abs = try std.fs.path.join(a, &.{ base_abs, rel });
+        defer a.free(abs);
         if (!fileExists(abs)) {
             std.debug.print("missing: {s}\n", .{abs});
             return error.FileMissing;
         }
 
-        const got = try sha256HexOfFile(A, abs);
-        defer A.free(got);
+        const got = try sha256HexOfFile(a, abs);
+        defer a.free(got);
 
         tot += 1;
         if (!std.mem.eql(u8, hex, got)) {
@@ -455,8 +450,8 @@ fn verifyOne(A: std.mem.Allocator, base_abs: []const u8) !void {
     std.debug.print("verify: {d}/{d} ok under {s}\n", .{ ok, tot, base_abs });
 }
 
-fn discoverVersionRoots(A: std.mem.Allocator) !std.ArrayList([]const u8) {
-    var out = std.ArrayList([]const u8).init(A);
+fn discoverVersionRoots(a: std.mem.Allocator) !std.ArrayList([]const u8) {
+    var out = std.ArrayList([]const u8){};
 
     const tp = "third_party";
     var tp_dir = std.fs.cwd().openDir(tp, .{ .iterate = true }) catch |e| {
@@ -470,8 +465,8 @@ fn discoverVersionRoots(A: std.mem.Allocator) !std.ArrayList([]const u8) {
         if (family.kind != .directory) continue;
         if (family.name.len == 0 or family.name[0] == '.') continue;
 
-        const fam_abs = try std.fs.path.join(A, &.{ tp, family.name });
-        defer A.free(fam_abs);
+        const fam_abs = try std.fs.path.join(a, &.{ tp, family.name });
+        defer a.free(fam_abs);
 
         var fam_dir = try std.fs.cwd().openDir(fam_abs, .{ .iterate = true });
         defer fam_dir.close();
@@ -481,30 +476,29 @@ fn discoverVersionRoots(A: std.mem.Allocator) !std.ArrayList([]const u8) {
             if (ver.kind != .directory) continue;
             if (ver.name.len == 0 or ver.name[0] == '.') continue;
 
-            const root_abs = try std.fs.path.join(A, &.{ fam_abs, ver.name });
+            const root_abs = try std.fs.path.join(a, &.{ fam_abs, ver.name });
 
-            var files = std.ArrayList([]const u8).init(A);
+            var files = std.ArrayList([]const u8){};
             defer {
-                for (files.items) |p| A.free(p);
-                files.deinit();
+                for (files.items) |p| a.free(p);
+                files.deinit(a);
             }
-            try walkFilesCollect(A, root_abs, &files);
+            try walkFilesCollect(a, root_abs, &files);
             if (files.items.len > 0) {
-                try out.append(try A.dupe(u8, root_abs));
+                try out.append(a, try a.dupe(u8, root_abs));
             }
-            // Always free the temporary joined path
-            A.free(root_abs);
+            a.free(root_abs);
         }
     }
 
     return out;
 }
 
-pub fn writeAllChecksums(A: std.mem.Allocator) !void {
-    var roots = try discoverVersionRoots(A);
+pub fn writeAllChecksums(a: std.mem.Allocator) !void {
+    var roots = try discoverVersionRoots(a);
     defer {
-        for (roots.items) |r| A.free(r);
-        roots.deinit();
+        for (roots.items) |r| a.free(r);
+        roots.deinit(a);
     }
 
     if (roots.items.len == 0) {
@@ -513,16 +507,16 @@ pub fn writeAllChecksums(A: std.mem.Allocator) !void {
     }
 
     for (roots.items) |root_abs| {
-        try writeChecksumsFor(A, root_abs);
+        try writeChecksumsFor(a, root_abs);
         std.debug.print("checksums: wrote {s}/CHECKSUMS.sha256\n", .{root_abs});
     }
 }
 
-pub fn verifyAll(A: std.mem.Allocator) !void {
-    var roots = try discoverVersionRoots(A);
+pub fn verifyAll(a: std.mem.Allocator) !void {
+    var roots = try discoverVersionRoots(a);
     defer {
-        for (roots.items) |r| A.free(r);
-        roots.deinit();
+        for (roots.items) |r| a.free(r);
+        roots.deinit(a);
     }
 
     if (roots.items.len == 0) {
@@ -531,13 +525,13 @@ pub fn verifyAll(A: std.mem.Allocator) !void {
     }
 
     for (roots.items) |root_abs| {
-        try verifyOne(A, root_abs);
+        try verifyOne(a, root_abs);
     }
 }
 
-fn bytesToHexLower(A: std.mem.Allocator, bytes: []const u8) ![]u8 {
+fn bytesToHexLower(a: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const lut = "0123456789abcdef";
-    var out = try A.alloc(u8, bytes.len * 2);
+    var out = try a.alloc(u8, bytes.len * 2);
     var j: usize = 0;
     for (bytes) |b| {
         out[j] = lut[(b >> 4) & 0xF];
@@ -551,7 +545,7 @@ fn bytesToHexLower(A: std.mem.Allocator, bytes: []const u8) ![]u8 {
 // Freeze lock
 // ─────────────────────────────────────────────────────────────
 
-fn latestByMtime(A: std.mem.Allocator, dir_abs: []const u8) !?[]const u8 {
+fn latestByMtime(a: std.mem.Allocator, dir_abs: []const u8) !?[]const u8 {
     var dir = try std.fs.cwd().openDir(dir_abs, .{ .iterate = true, .access_sub_paths = true });
     defer dir.close();
 
@@ -563,28 +557,26 @@ fn latestByMtime(A: std.mem.Allocator, dir_abs: []const u8) !?[]const u8 {
         if (e.name.len == 0 or e.name[0] == '.') continue;
         if (std.mem.eql(u8, e.name, "node_modules")) continue;
 
-        const sub_abs = try std.fs.path.join(A, &.{ dir_abs, e.name });
-        defer A.free(sub_abs);
+        const sub_abs = try std.fs.path.join(a, &.{ dir_abs, e.name });
+        defer a.free(sub_abs);
 
-        // Only consider directories that actually contain files
-        var files = std.ArrayList([]const u8).init(A);
+        var files = std.ArrayList([]const u8){};
         defer {
-            for (files.items) |p| A.free(p);
-            files.deinit();
+            for (files.items) |p| a.free(p);
+            files.deinit(a);
         }
-        try walkFilesCollect(A, sub_abs, &files);
+        try walkFilesCollect(a, sub_abs, &files);
         if (files.items.len == 0) continue;
 
-        // Prefer newest by mtime; fallback to lexicographic if stat fails
         const st = std.fs.cwd().statFile(sub_abs) catch {
             if (best == null or std.mem.lessThan(u8, best.?.name, e.name)) {
-                best = .{ .name = try A.dupe(u8, e.name), .mtime = 0 };
+                best = .{ .name = try a.dupe(u8, e.name), .mtime = 0 };
             }
             continue;
         };
         const m = st.mtime;
         if (best == null or m > best.?.mtime) {
-            best = .{ .name = try A.dupe(u8, e.name), .mtime = m };
+            best = .{ .name = try a.dupe(u8, e.name), .mtime = m };
         }
     }
 
@@ -603,7 +595,7 @@ fn jsonEscapeInto(w: anytype, s: []const u8) !void {
     };
 }
 
-fn freezeLock(A: std.mem.Allocator) !void {
+fn freezeLock(a: std.mem.Allocator) !void {
     const root = "third_party";
 
     var tp = std.fs.cwd().openDir(root, .{ .iterate = true }) catch |e| {
@@ -617,30 +609,30 @@ fn freezeLock(A: std.mem.Allocator) !void {
 
     var it = tp.iterate();
 
-    var entries = std.ArrayList(struct { key: []const u8, val: []const u8 }).init(A);
+    var entries = std.ArrayList(struct { key: []const u8, val: []const u8 }){};
     defer {
         for (entries.items) |kv| {
-            A.free(kv.key);
-            A.free(kv.val);
+            a.free(kv.key);
+            a.free(kv.val);
         }
-        entries.deinit();
+        entries.deinit(a);
     }
 
     while (try it.next()) |e| {
         if (e.kind != .directory) continue;
         if (e.name.len == 0 or e.name[0] == '.') continue;
 
-        const fam_abs = try std.fs.path.join(A, &.{ root, e.name });
-        defer A.free(fam_abs);
+        const fam_abs = try std.fs.path.join(a, &.{ root, e.name });
+        defer a.free(fam_abs);
 
-        const vopt = try latestByMtime(A, fam_abs);
+        const vopt = try latestByMtime(a, fam_abs);
         if (vopt) |vname| {
-            try entries.append(.{ .key = try A.dupe(u8, e.name), .val = vname });
+            try entries.append(a, .{ .key = try a.dupe(u8, e.name), .val = vname });
         }
     }
 
-    var buf = std.ArrayList(u8).init(A);
-    defer buf.deinit();
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(a);
     var w = buf.writer();
 
     try w.writeAll("{");
@@ -659,8 +651,8 @@ fn freezeLock(A: std.mem.Allocator) !void {
     }
     try w.writeAll("}\n");
 
-    const lock_path = try std.fs.path.join(A, &.{ root, "VENDOR.lock" });
-    defer A.free(lock_path);
+    const lock_path = try std.fs.path.join(a, &.{ root, "VENDOR.lock" });
+    defer a.free(lock_path);
     try writeTextFile(lock_path, buf.items);
 
     std.debug.print("freeze: wrote {s}\n", .{lock_path});
@@ -670,13 +662,11 @@ fn freezeLock(A: std.mem.Allocator) !void {
 // Bootstrap (config-driven)
 // ─────────────────────────────────────────────────────────────
 
-fn parseKvConfig(A: std.mem.Allocator, path: []const u8) !std.StringHashMap([]const u8) {
-    var map = std.StringHashMap([]const u8).init(A);
+fn parseKvConfig(a: std.mem.Allocator, path: []const u8) !std.StringHashMap([]const u8) {
+    var map = std.StringHashMap([]const u8).init(a);
 
-    var f = try std.fs.cwd().openFile(path, .{});
-    defer f.close();
-    const buf = try f.readToEndAlloc(A, 1 << 16);
-    defer A.free(buf);
+    const buf = try slurpFile(a, path, 1 << 16);
+    defer a.free(buf);
 
     var lines = std.mem.splitScalar(u8, buf, '\n');
     while (lines.next()) |raw| {
@@ -688,8 +678,7 @@ fn parseKvConfig(A: std.mem.Allocator, path: []const u8) !std.StringHashMap([]co
         const v = std.mem.trim(u8, ln[eq + 1 ..], " \t");
         if (k.len == 0) continue;
 
-        // store a duped value (key points into buf, safe since we keep buf alive while parsing)
-        try map.put(try A.dupe(u8, k), try A.dupe(u8, v));
+        try map.put(try a.dupe(u8, k), try a.dupe(u8, v));
     }
     return map;
 }
@@ -698,8 +687,7 @@ fn get(map: *const std.StringHashMap([]const u8), key: []const u8) ?[]const u8 {
     return map.get(key);
 }
 
-fn sub_bootstrap(A: std.mem.Allocator, it: *std.process.ArgIterator) !void {
-    // Allow overriding the config path; default is tools/vendor.config
+fn sub_bootstrap(a: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     var cfg_path: []const u8 = "tools/vendor.config";
     while (it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--config")) {
@@ -713,8 +701,7 @@ fn sub_bootstrap(A: std.mem.Allocator, it: *std.process.ArgIterator) !void {
         }
     }
 
-    // MUST be 'var' so we can call deinit() below.
-    var map = parseKvConfig(A, cfg_path) catch |e| {
+    var map = parseKvConfig(a, cfg_path) catch |e| {
         if (e == error.FileNotFound) {
             std.debug.print("bootstrap: no config at {s}; nothing to do\n", .{cfg_path});
             return;
@@ -724,39 +711,36 @@ fn sub_bootstrap(A: std.mem.Allocator, it: *std.process.ArgIterator) !void {
     defer {
         var itx = map.iterator();
         while (itx.next()) |ent| {
-            A.free(ent.key_ptr.*);
-            A.free(ent.value_ptr.*);
+            a.free(ent.key_ptr.*);
+            a.free(ent.value_ptr.*);
         }
         map.deinit();
     }
 
     var did_any: bool = false;
 
-    // KaTeX
     if (get(&map, "katex.version")) |k_ver| {
         const k_mf = get(&map, "katex.manifest") orelse {
             std.debug.print("bootstrap: katex.version set but katex.manifest missing\n", .{});
             return error.Invalid;
         };
         const k_cdn = get(&map, "katex.cdn") orelse "jsdelivr";
-        try fetchKatex(A, k_ver, k_mf, k_cdn);
+        try fetchKatex(a, k_ver, k_mf, k_cdn);
         did_any = true;
     }
 
-    // Tailwind theme
     if (get(&map, "tailwind.version")) |t_ver| {
         const t_url = get(&map, "tailwind.url") orelse {
             std.debug.print("bootstrap: tailwind.version set but tailwind.url missing\n", .{});
             return error.Invalid;
         };
-        try fetchTailwindTheme(A, t_ver, t_url);
+        try fetchTailwindTheme(a, t_ver, t_url);
         did_any = true;
     }
 
-    // Finalize: checksums -> lock -> verify
-    try writeAllChecksums(A);
-    try freezeLock(A);
-    try verifyAll(A);
+    try writeAllChecksums(a);
+    try freezeLock(a);
+    try verifyAll(a);
 
     if (!did_any)
         std.debug.print("bootstrap: config had no vendor entries; wrote/checked nothing\n", .{})

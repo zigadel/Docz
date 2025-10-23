@@ -1,14 +1,199 @@
 const std = @import("std");
-const hot = @import("hot_reload.zig");
+const builtin = @import("builtin");
 
-// Import core pieces directly to avoid circular/self import of "docz"
-const Tokenizer = @import("../src/parser/tokenizer.zig");
-const Parser = @import("../src/parser/parser.zig");
-const Renderer = @import("../src/renderer/html.zig");
+// Import sibling hot-reload as a module (not by relative path)
+const hot = @import("web_preview_hot");
+
+// Depend on docz public API, not individual source files
+const docz = @import("docz");
+const Tokenizer = docz.Tokenizer;
+const Parser = docz.Parser;
+const Renderer = docz.Renderer;
 
 fn decU64(n: u64, buf: *[24]u8) []const u8 {
     return std.fmt.bufPrint(buf, "{d}", .{n}) catch unreachable;
 }
+
+// ----------------------------
+// Minimal HTTP primitives
+// ----------------------------
+const Header = struct { name: []const u8, value: []const u8 };
+
+const Status = enum(u16) {
+    ok = 200,
+    no_content = 204,
+    internal_server_error = 500,
+};
+
+fn statusReason(s: Status) []const u8 {
+    return switch (s) {
+        .ok => "OK",
+        .no_content => "No Content",
+        .internal_server_error => "Internal Server Error",
+    };
+}
+
+const RespondOpts = struct {
+    status: Status = .ok,
+    extra_headers: []const Header = &.{},
+};
+
+const Request = struct {
+    allocator: std.mem.Allocator,
+    stream: *std.net.Stream,
+    method: []const u8,
+    target: []const u8,
+
+    fn respond(self: *Request, body: []const u8, opts: RespondOpts) !void {
+        const code = @intFromEnum(opts.status);
+        const reason = statusReason(opts.status);
+
+        var len_buf: [24]u8 = undefined;
+        const cl = decU64(body.len, &len_buf);
+
+        const A = self.allocator;
+
+        // Use separate consts so each defer captures the correct slice.
+        const status_line = try std.fmt.allocPrint(A, "HTTP/1.1 {d} {s}\r\n", .{ code, reason });
+        defer A.free(status_line);
+        try streamWriteAllCompat(self.stream, status_line);
+
+        const cl_line = try std.fmt.allocPrint(A, "Content-Length: {s}\r\n", .{cl});
+        defer A.free(cl_line);
+        try streamWriteAllCompat(self.stream, cl_line);
+
+        // Extra headers
+        for (opts.extra_headers) |h| {
+            const hline = try std.fmt.allocPrint(A, "{s}: {s}\r\n", .{ h.name, h.value });
+            defer A.free(hline);
+            try streamWriteAllCompat(self.stream, hline);
+        }
+
+        // End of headers + body
+        try streamWriteAllCompat(self.stream, "Connection: close\r\n\r\n");
+        try streamWriteAllCompat(self.stream, body);
+    }
+};
+
+// --- compat: write/read loops on sockets ---
+fn writeAllCompat(w: anytype, bytes: []const u8) !void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const n = try w.write(bytes[off..]);
+        if (n == 0) return error.EndOfStream;
+        off += n;
+    }
+}
+
+fn streamWriteAllCompat(s: *std.net.Stream, bytes: []const u8) !void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const n = try s.write(bytes[off..]);
+        if (n == 0) return error.EndOfStream;
+        off += n;
+    }
+}
+
+// --- compat: read from TCP sockets via OS recv (avoids Windows ReadFile(87))
+fn readStreamCompat(stream: *std.net.Stream, buf: []u8) !usize {
+    if (builtin.os.tag == .windows) {
+        const ws2 = std.os.windows.ws2_32;
+
+        const ret: c_int = ws2.recv(
+            stream.handle,
+            buf.ptr,
+            @as(c_int, @intCast(buf.len)),
+            0,
+        );
+        if (ret == ws2.SOCKET_ERROR) {
+            const werr = ws2.WSAGetLastError(); // enum(u16)
+            const code: u16 = @intFromEnum(werr);
+            return switch (code) {
+                10035 => error.WouldBlock, // WSAEWOULDBLOCK
+                10004 => error.Interrupted, // WSAEINTR
+                10054 => error.ConnectionResetByPeer, // WSAECONNRESET
+                else => error.Unexpected,
+            };
+        }
+        return @as(usize, @intCast(ret));
+    } else {
+        const n = try std.posix.recv(stream.handle, buf, 0);
+        return @as(usize, n);
+    }
+}
+
+// ---- Hardened request reader: tolerate Windows' transient error.Unexpected
+fn receiveRequest(alloc: std.mem.Allocator, stream: *std.net.Stream) !Request {
+    var hdr = std.ArrayList(u8){};
+    errdefer hdr.deinit(alloc);
+
+    const max_header_bytes: usize = 64 * 1024;
+    const start_ms = std.time.milliTimestamp();
+    const retry_budget_ms: i64 = 1800; // tolerate transient socket flakes for ~1.8s
+
+    var have_first_line = false;
+
+    while (!have_first_line and hdr.items.len < max_header_bytes) {
+        var tmp: [2048]u8 = undefined;
+
+        const n = readStreamCompat(stream, tmp[0..]) catch |e| switch (e) {
+            // These all indicate “no data yet / transient”, so back off briefly
+            // and keep trying while we still have budget.
+            error.WouldBlock,
+            error.Interrupted,
+            error.ConnectionResetByPeer,
+            error.Unexpected,
+            => {
+                if (std.time.milliTimestamp() - start_ms < retry_budget_ms) {
+                    std.Thread.sleep(150 * std.time.ns_per_ms);
+                    continue;
+                }
+                // Out of patience: treat as bad/empty request.
+                return error.BadRequest;
+            },
+        };
+
+        if (n == 0) break;
+
+        try hdr.appendSlice(alloc, tmp[0..n]);
+
+        // We only need the first line to route.
+        if (std.mem.indexOfScalar(u8, hdr.items, '\n') != null) {
+            have_first_line = true;
+        }
+    }
+
+    if (hdr.items.len == 0) return error.BadRequest;
+
+    // Slice first line; tolerate CRLF/LF
+    const nl_i_opt = std.mem.indexOfScalar(u8, hdr.items, '\n');
+    const line_end = nl_i_opt orelse hdr.items.len;
+    const line_raw = hdr.items[0..line_end];
+    const first = if (line_raw.len > 0 and line_raw[line_raw.len - 1] == '\r')
+        line_raw[0 .. line_raw.len - 1]
+    else
+        line_raw;
+
+    var it = std.mem.tokenizeScalar(u8, first, ' ');
+    const m = it.next() orelse "GET";
+    const t = it.next() orelse "/";
+
+    const method = try alloc.dupe(u8, m);
+    const target = try alloc.dupe(u8, t);
+
+    hdr.deinit(alloc);
+
+    return .{
+        .allocator = alloc,
+        .stream = stream,
+        .method = method,
+        .target = target,
+    };
+}
+
+// ----------------------------
+// Preview server
+// ----------------------------
 
 pub const PreviewServer = struct {
     allocator: std.mem.Allocator,
@@ -37,31 +222,41 @@ pub const PreviewServer = struct {
 
         std.debug.print("🔎 web-preview listening on http://127.0.0.1:{d}\n", .{port});
 
+        // Hot-reload poller (best-effort)
         _ = try std.Thread.spawn(.{}, pollFileAndBroadcast, .{ &self.broadcaster, "docs/SPEC.dcz", 250 });
 
         while (true) {
-            const net_conn = try tcp.accept();
+            const net_conn = tcp.accept() catch |e| switch (e) {
+                // Transient accept errors: keep serving
+                error.ConnectionAborted, error.ConnectionResetByPeer => continue,
+                else => return e,
+            };
             defer net_conn.stream.close();
 
-            var read_buf: [16 * 1024]u8 = undefined;
-            var http = std.http.Server.init(net_conn, &read_buf);
-
-            var req = http.receiveHead() catch |e| {
-                std.debug.print("❌ receiveHead error: {s}\n", .{@errorName(e)});
+            var req = receiveRequest(self.allocator, @constCast(&net_conn.stream)) catch |e| {
+                if (e != error.BadRequest) {
+                    std.debug.print("❌ receiveRequest error: {s}\n", .{@errorName(e)});
+                }
                 continue;
             };
 
-            const path = req.head.target;
+            defer {
+                self.allocator.free(req.method);
+                self.allocator.free(req.target);
+            }
+
+            const path = req.target;
             const bare_path = stripQuery(path);
 
             const is_hot = std.mem.eql(u8, bare_path, "/__docz_hot.txt");
             const is_favicon = std.mem.eql(u8, bare_path, "/favicon.ico");
             if (!is_hot and !is_favicon) {
-                std.debug.print("→ {s} {s}\n", .{ @tagName(req.head.method), path });
+                const pfx_len: usize = @min(path.len, @as(usize, 64));
+                std.debug.print("→ {s} {s}\n", .{ path[0..pfx_len], path });
             }
 
-            self.handle(&http, &req) catch |e| {
-                std.debug.print("❌ handler error: {s}\n", .{@errorName(e)});
+            self.handle(&req) catch |he| {
+                std.debug.print("❌ handler error: {s}\n", .{@errorName(he)});
                 const msg = "Internal server error\n";
                 _ = req.respond(msg, .{
                     .status = .internal_server_error,
@@ -71,9 +266,8 @@ pub const PreviewServer = struct {
         }
     }
 
-    fn handle(self: *PreviewServer, _srv: *std.http.Server, req: *std.http.Server.Request) !void {
-        _ = _srv;
-        const path = req.head.target;
+    fn handle(self: *PreviewServer, req: *Request) !void {
+        const path = req.target;
 
         if (std.mem.startsWith(u8, path, "/third_party/")) {
             const rel = path[1..];
@@ -95,7 +289,7 @@ pub const PreviewServer = struct {
             });
         }
 
-        // Placeholder SSE endpoint (non-streaming to match your Zig stdlib)
+        // Placeholder SSE endpoint (non-streaming in this build)
         if (std.mem.eql(u8, stripQuery(path), "/hot")) {
             return handleSSE(req);
         }
@@ -145,7 +339,7 @@ pub const PreviewServer = struct {
         return self.serveIndex(req);
     }
 
-    fn handleSSE(req: *std.http.Server.Request) !void {
+    fn handleSSE(req: *Request) !void {
         const body = "SSE endpoint placeholder (streaming disabled in this build).\n";
         return req.respond(body, .{
             .status = .ok,
@@ -157,25 +351,21 @@ pub const PreviewServer = struct {
         });
     }
 
-    fn serveIndex(self: *PreviewServer, req: *std.http.Server.Request) !void {
+    fn serveIndex(self: *PreviewServer, req: *Request) !void {
         const html = try buildIndexHtml(self.allocator);
         defer self.allocator.free(html);
-
-        var len_buf: [24]u8 = undefined;
-        const cl = decU64(html.len, &len_buf);
 
         return req.respond(html, .{
             .status = .ok,
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "text/html; charset=utf-8" },
-                .{ .name = "Content-Length", .value = cl },
                 .{ .name = "Cache-Control", .value = "no-cache" },
                 .{ .name = "Connection", .value = "close" },
             },
         });
     }
 
-    fn serveRenderedDcz(self: *PreviewServer, req: *std.http.Server.Request, fs_path: []const u8) !void {
+    fn serveRenderedDcz(self: *PreviewServer, req: *Request, fs_path: []const u8) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const A = arena.allocator();
@@ -208,27 +398,23 @@ pub const PreviewServer = struct {
 
         const t2 = std.time.milliTimestamp();
         var ast = try Parser.parse(tokens, A);
-        defer ast.deinit();
+        defer ast.deinit(A);
         std.debug.print("  parse ok ({d} nodes, {d}ms)\n", .{ ast.children.items.len, std.time.milliTimestamp() - t2 });
 
         const t3 = std.time.milliTimestamp();
-        const html = try Renderer.renderHTML(&ast, A); // 👈 use core renderer here
+        const html = try Renderer.renderHTML(&ast, A);
         std.debug.print("  render ok ({d} bytes, {d}ms)\n", .{ html.len, std.time.milliTimestamp() - t3 });
-
-        var len_buf: [24]u8 = undefined;
-        const cl = decU64(html.len, &len_buf);
 
         return req.respond(html, .{
             .status = .ok,
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "text/html; charset=utf-8" },
                 .{ .name = "Cache-Control", .value = "no-cache" },
-                .{ .name = "Content-Length", .value = cl },
             },
         });
     }
 
-    fn serveRenderedFragment(self: *PreviewServer, req: *std.http.Server.Request, fs_path: []const u8) !void {
+    fn serveRenderedFragment(self: *PreviewServer, req: *Request, fs_path: []const u8) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const A = arena.allocator();
@@ -261,7 +447,7 @@ pub const PreviewServer = struct {
 
         const t2 = std.time.milliTimestamp();
         var ast = try Parser.parse(tokens, A);
-        defer ast.deinit();
+        defer ast.deinit(A);
         std.debug.print("  parse ok ({d} nodes, {d}ms)\n", .{ ast.children.items.len, std.time.milliTimestamp() - t2 });
 
         const t3 = std.time.milliTimestamp();
@@ -272,20 +458,16 @@ pub const PreviewServer = struct {
         const frag = try extractBodyFragment(A, full);
         std.debug.print("  extract body ok ({d} bytes, {d}ms)\n", .{ frag.len, std.time.milliTimestamp() - t4 });
 
-        var len_buf: [24]u8 = undefined;
-        const cl = decU64(frag.len, &len_buf);
-
         return req.respond(frag, .{
             .status = .ok,
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = "text/html; charset=utf-8" },
                 .{ .name = "Cache-Control", .value = "no-cache" },
-                .{ .name = "Content-Length", .value = cl },
             },
         });
     }
 
-    fn serveFile(self: *PreviewServer, req: *std.http.Server.Request, abs_path: []const u8) !void {
+    fn serveFile(self: *PreviewServer, req: *Request, abs_path: []const u8) !void {
         var file = try std.fs.cwd().openFile(abs_path, .{});
         defer file.close();
 
@@ -304,23 +486,19 @@ pub const PreviewServer = struct {
         const cache_header =
             if (is_third_party) "public, max-age=31536000, immutable" else "no-cache";
 
-        var len_buf: [24]u8 = undefined;
-        const len_s = decU64(n, &len_buf);
-
         return req.respond(body[0..n], .{
             .status = .ok,
             .extra_headers = &.{
                 .{ .name = "Content-Type", .value = ctype },
-                .{ .name = "Content-Length", .value = len_s },
                 .{ .name = "Cache-Control", .value = cache_header },
             },
         });
     }
 };
 
-/////////////////////////////
-//   Helper functions     //
-/////////////////////////////
+// ----------------------------
+// Helpers
+// ----------------------------
 
 fn trimTrailingSlash(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
     var end = s.len;
@@ -329,13 +507,13 @@ fn trimTrailingSlash(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
 }
 
 fn sanitizePath(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
-    var norm = std.ArrayList(u8).init(allocator);
-    defer norm.deinit();
-    try norm.ensureTotalCapacity(raw.len);
-    for (raw) |c| try norm.append(if (c == '\\') '/' else c);
+    var norm = std.ArrayList(u8){};
+    defer norm.deinit(allocator);
+    try norm.ensureTotalCapacity(allocator, raw.len);
+    for (raw) |c| try norm.append(allocator, if (c == '\\') '/' else c);
 
-    var segs = std.ArrayList([]const u8).init(allocator);
-    defer segs.deinit();
+    var segs = std.ArrayList([]const u8){};
+    defer segs.deinit(allocator);
 
     var it = std.mem.splitScalar(u8, norm.items, '/');
     var depth: usize = 0;
@@ -355,19 +533,19 @@ fn sanitizePath(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
             }
         }
         if (!ok) return allocator.alloc(u8, 0);
-        try segs.append(seg);
+        try segs.append(allocator, seg);
         depth += 1;
     }
 
-    var out = std.ArrayList(u8).init(allocator);
-    errdefer out.deinit();
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
     var first = true;
     for (segs.items) |seg| {
-        if (!first) try out.append('/');
+        if (!first) try out.append(allocator, '/');
         first = false;
-        try out.appendSlice(seg);
+        try out.appendSlice(allocator, seg);
     }
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(allocator);
 }
 
 fn withHtmlExt(allocator: std.mem.Allocator, rel: []const u8) ![]const u8 {
@@ -457,9 +635,7 @@ fn hexVal(c: u8) ?u4 {
 }
 
 fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    var f = try std.fs.cwd().openFile(path, .{});
-    defer f.close();
-    return try f.readToEndAlloc(allocator, 1 << 26);
+    return std.fs.cwd().readFileAlloc(path, allocator, @enumFromInt(1 << 26));
 }
 
 fn pollFileAndBroadcast(b: *hot.Broadcaster, path: []const u8, ms: u64) !void {
