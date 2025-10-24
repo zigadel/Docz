@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-// Link platform-specific networking deps based on the artifact's target.
+/// Link platform-specific networking deps (TLS, sockets) for Windows.
 fn linkPlatformNetDeps(artifact: *std.Build.Step.Compile) void {
     const rt = artifact.root_module.resolved_target orelse return;
     if (rt.result.os.tag == .windows) {
@@ -16,14 +16,17 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Toggle extra test logging via: zig build test-all -Dverbose-tests
+    // ─────────────────────────────────────────────
+    // Build options visible via @import("build_options")
+    // Toggle: zig build test-all -Dverbose-tests
+    // ─────────────────────────────────────────────
     const verbose_tests = b.option(bool, "verbose-tests", "Print debug logs in tests") orelse false;
 
     const build_opts = b.addOptions();
     build_opts.addOption(bool, "verbose_tests", verbose_tests);
 
     // ─────────────────────────────────────────────
-    // Public module (root.zig)
+    // Public library surface (root.zig is API entry)
     // ─────────────────────────────────────────────
     const docz_module = b.createModule(.{
         .root_source_file = b.path("root.zig"),
@@ -33,22 +36,41 @@ pub fn build(b: *std.Build) void {
     docz_module.addOptions("build_options", build_opts);
 
     // ─────────────────────────────────────────────
-    // Web preview modules (kept OUT of docz_module to avoid cycles)
+    // Preview server modules (under src/web_preview/*)
+    // Kept OUT of docz_module to avoid cycles.
     // ─────────────────────────────────────────────
     const web_preview_hot_mod = b.createModule(.{
-        .root_source_file = b.path("web-preview/hot_reload.zig"),
+        .root_source_file = b.path("src/web_preview/hot_reload.zig"),
         .target = target,
         .optimize = optimize,
     });
+    web_preview_hot_mod.addOptions("build_options", build_opts);
+
+    // helpers as separate named modules so tests can import them cleanly
+    const web_preview_limits_mod = b.createModule(.{
+        .root_source_file = b.path("src/web_preview/limits.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    web_preview_limits_mod.addOptions("build_options", build_opts);
+
+    const web_preview_timeout_mod = b.createModule(.{
+        .root_source_file = b.path("src/web_preview/timeout.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    web_preview_timeout_mod.addOptions("build_options", build_opts);
 
     const web_preview_mod = b.createModule(.{
-        .root_source_file = b.path("web-preview/server.zig"),
+        .root_source_file = b.path("src/web_preview/server.zig"),
         .target = target,
         .optimize = optimize,
     });
-    // The server uses public docz APIs and the hot-reload helper:
+    web_preview_mod.addOptions("build_options", build_opts);
     web_preview_mod.addImport("docz", docz_module);
     web_preview_mod.addImport("web_preview_hot", web_preview_hot_mod);
+    web_preview_mod.addImport("web_preview_limits", web_preview_limits_mod);
+    web_preview_mod.addImport("web_preview_timeout", web_preview_timeout_mod);
 
     // ─────────────────────────────────────────────
     // CLI root module
@@ -60,12 +82,11 @@ pub fn build(b: *std.Build) void {
     });
     cli_root_module.addOptions("build_options", build_opts);
     cli_root_module.addImport("docz", docz_module);
-    // Make web preview available to the CLI (main/preview command):
     cli_root_module.addImport("web_preview", web_preview_mod);
     cli_root_module.addImport("web_preview_hot", web_preview_hot_mod);
 
     // ─────────────────────────────────────────────
-    // Internal converter modules (not exported from root.zig)
+    // Converters (internal modules)
     // ─────────────────────────────────────────────
     const html_import_mod = b.createModule(.{
         .root_source_file = b.path("src/convert/html/import.zig"),
@@ -82,7 +103,8 @@ pub fn build(b: *std.Build) void {
     });
     html_export_mod.addOptions("build_options", build_opts);
     html_export_mod.addImport("docz", docz_module);
-    // root.zig does: const html_export = @import("html_export");
+
+    // root.zig does: @import("html_export")
     docz_module.addImport("html_export", html_export_mod);
 
     const md_import_mod = b.createModule(.{
@@ -117,7 +139,7 @@ pub fn build(b: *std.Build) void {
     latex_export_mod.addOptions("build_options", build_opts);
     latex_export_mod.addImport("docz", docz_module);
 
-    // Expose converters to the CLI
+    // Make converters addressable from CLI
     cli_root_module.addImport("html_import", html_import_mod);
     cli_root_module.addImport("html_export", html_export_mod);
     cli_root_module.addImport("md_import", md_import_mod);
@@ -126,7 +148,17 @@ pub fn build(b: *std.Build) void {
     cli_root_module.addImport("latex_export", latex_export_mod);
 
     // ─────────────────────────────────────────────
-    // Vendor tool (as module + exe)
+    // Utility modules (exposed to tests)
+    // ─────────────────────────────────────────────
+    const util_hash_manifest_mod = b.createModule(.{
+        .root_source_file = b.path("src/util/hash_manifest.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    util_hash_manifest_mod.addOptions("build_options", build_opts);
+
+    // ─────────────────────────────────────────────
+    // Tools: vendor (module + exe) and vendor-verify (HTTP-free)
     // ─────────────────────────────────────────────
     const vendor_mod = b.createModule(.{
         .root_source_file = b.path("tools/vendor.zig"),
@@ -141,6 +173,16 @@ pub fn build(b: *std.Build) void {
     linkPlatformNetDeps(vendor_tool);
     b.installArtifact(vendor_tool);
 
+    const vendor_verify_mod = b.createModule(.{
+        .root_source_file = b.path("tools/vendor_verify_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const vendor_verify_exe = b.addExecutable(.{
+        .name = "docz-vendor-verify",
+        .root_module = vendor_verify_mod,
+    });
+
     // ─────────────────────────────────────────────
     // CLI executable
     // ─────────────────────────────────────────────
@@ -151,13 +193,12 @@ pub fn build(b: *std.Build) void {
     linkPlatformNetDeps(exe);
     b.installArtifact(exe);
 
+    // A second installed exe name for e2e (prevents locking on Windows).
     const exe_name = if (builtin.os.tag == .windows) "docz.exe" else "docz";
     const e2e_name = if (builtin.os.tag == .windows) "docz-e2e.exe" else "docz-e2e";
-
-    // Install a separate e2e launcher so tests don't lock the main binary
     const e2e_install = b.addInstallArtifact(exe, .{ .dest_sub_path = e2e_name });
 
-    // Absolute/relative paths for tests
+    // Paths exposed to tests via build_options.
     const docz_rel = b.fmt("zig-out/bin/{s}", .{exe_name});
     const e2e_rel = b.fmt("zig-out/bin/{s}", .{e2e_name});
     const docz_abs = b.getInstallPath(.bin, exe_name);
@@ -168,7 +209,9 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption([]const u8, "docz_abspath", docz_abs);
     build_opts.addOption([]const u8, "e2e_abspath", e2e_abs);
 
+    // ─────────────────────────────────────────────
     // Convenience run steps
+    // ─────────────────────────────────────────────
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "Run the Docz CLI");
@@ -181,7 +224,7 @@ pub fn build(b: *std.Build) void {
     prev_step.dependOn(&prev.step);
 
     // ─────────────────────────────────────────────
-    // Vendor steps
+    // Vendor pipeline steps
     // ─────────────────────────────────────────────
     const vendor_cfg = b.option([]const u8, "vendor-config", "Path to tools/vendor.config") orelse "tools/vendor.config";
 
@@ -200,13 +243,12 @@ pub fn build(b: *std.Build) void {
     const vendor_checks_step = b.step("vendor-checksums", "Write/refresh CHECKSUMS.sha256");
     vendor_checks_step.dependOn(&vendor_checks.step);
 
-    const vendor_verify = b.addRunArtifact(vendor_tool);
-    vendor_verify.addArg("verify");
-    const vendor_verify_step_old = b.step("vendor-verify-old", "Verify CHECKSUMS using full vendor tool");
-    vendor_verify_step_old.dependOn(&vendor_verify.step);
+    const run_vendor_verify = b.addRunArtifact(vendor_verify_exe);
+    const step_vendor_verify = b.step("vendor-verify", "Verify third_party checksums (no HTTP)");
+    step_vendor_verify.dependOn(&run_vendor_verify.step);
 
     // ─────────────────────────────────────────────
-    // Unit tests (docz + converters)
+    // Unit tests (library + converters) — embedded `test {}` blocks
     // ─────────────────────────────────────────────
     const unit_tests = b.addTest(.{ .root_module = docz_module });
     linkPlatformNetDeps(unit_tests);
@@ -246,7 +288,7 @@ pub fn build(b: *std.Build) void {
     unit_step.dependOn(&latex_export_unit_run.step);
 
     // ─────────────────────────────────────────────
-    // CLI unit tests (each CLI file is its own module-under-test)
+    // CLI unit tests (module-under-test style)
     // ─────────────────────────────────────────────
     const cli_common_mod = b.createModule(.{
         .root_source_file = b.path("src/cli/common.zig"),
@@ -286,7 +328,6 @@ pub fn build(b: *std.Build) void {
     });
     cli_preview_mod.addOptions("build_options", build_opts);
     cli_preview_mod.addImport("docz", docz_module);
-    // Preview command needs the server APIs:
     cli_preview_mod.addImport("web_preview", web_preview_mod);
     cli_preview_mod.addImport("web_preview_hot", web_preview_hot_mod);
 
@@ -299,31 +340,25 @@ pub fn build(b: *std.Build) void {
     cli_enable_mod.addImport("docz", docz_module);
 
     const cli_common_unit = b.addTest(.{ .root_module = cli_common_mod });
-    linkPlatformNetDeps(cli_common_unit);
     const cli_convert_unit = b.addTest(.{ .root_module = cli_convert_mod });
-    linkPlatformNetDeps(cli_convert_unit);
     const cli_build_unit = b.addTest(.{ .root_module = cli_build_mod });
-    linkPlatformNetDeps(cli_build_unit);
     const cli_preview_unit = b.addTest(.{ .root_module = cli_preview_mod });
-    linkPlatformNetDeps(cli_preview_unit);
     const cli_enable_unit = b.addTest(.{ .root_module = cli_enable_mod });
+    linkPlatformNetDeps(cli_common_unit);
+    linkPlatformNetDeps(cli_convert_unit);
+    linkPlatformNetDeps(cli_build_unit);
+    linkPlatformNetDeps(cli_preview_unit);
     linkPlatformNetDeps(cli_enable_unit);
 
-    const cli_common_run = b.addRunArtifact(cli_common_unit);
-    const cli_convert_run = b.addRunArtifact(cli_convert_unit);
-    const cli_build_run = b.addRunArtifact(cli_build_unit);
-    const cli_preview_run = b.addRunArtifact(cli_preview_unit);
-    const cli_enable_run = b.addRunArtifact(cli_enable_unit);
-
     const cli_unit_step = b.step("test-cli", "Run CLI unit tests");
-    cli_unit_step.dependOn(&cli_common_run.step);
-    cli_unit_step.dependOn(&cli_convert_run.step);
-    cli_unit_step.dependOn(&cli_build_run.step);
-    cli_unit_step.dependOn(&cli_preview_run.step);
-    cli_unit_step.dependOn(&cli_enable_run.step);
+    cli_unit_step.dependOn(&b.addRunArtifact(cli_common_unit).step);
+    cli_unit_step.dependOn(&b.addRunArtifact(cli_convert_unit).step);
+    cli_unit_step.dependOn(&b.addRunArtifact(cli_build_unit).step);
+    cli_unit_step.dependOn(&b.addRunArtifact(cli_preview_unit).step);
+    cli_unit_step.dependOn(&b.addRunArtifact(cli_enable_unit).step);
 
     // ─────────────────────────────────────────────
-    // Integration tests
+    // Integration tests (aggregate runner pattern)
     // ─────────────────────────────────────────────
     const integration_module = b.createModule(.{
         .root_source_file = b.path("tests/test_all_integration.zig"),
@@ -339,13 +374,21 @@ pub fn build(b: *std.Build) void {
     integration_module.addImport("latex_import", latex_import_mod);
     integration_module.addImport("latex_export", latex_export_mod);
     integration_module.addImport("vendor", vendor_mod);
-    // Allow tests to @import("web_preview") / @import("web_preview_hot")
     integration_module.addImport("web_preview", web_preview_mod);
     integration_module.addImport("web_preview_hot", web_preview_hot_mod);
 
+    // helpers visible to tests by module name
+    integration_module.addImport("web_preview_limits", web_preview_limits_mod);
+    integration_module.addImport("web_preview_timeout", web_preview_timeout_mod);
+    integration_module.addImport("util_hash_manifest", util_hash_manifest_mod);
+
     const integration_tests = b.addTest(.{ .root_module = integration_module });
     linkPlatformNetDeps(integration_tests);
+
     const integration_run = b.addRunArtifact(integration_tests);
+    // Auto-stop the preview server inside integration tests after 2 seconds.
+    integration_run.setEnvironmentVariable("DOCZ_TEST_AUTOSTOP_MS", "2000");
+
     const integration_step = b.step("test-integration", "Run integration tests");
     integration_step.dependOn(&integration_run.step);
 
@@ -359,12 +402,14 @@ pub fn build(b: *std.Build) void {
     });
     e2e_module.addOptions("build_options", build_opts);
     e2e_module.addImport("docz", docz_module);
+    e2e_module.addImport("web_preview_limits", web_preview_limits_mod);
+    e2e_module.addImport("web_preview_timeout", web_preview_timeout_mod);
+    e2e_module.addImport("util_hash_manifest", util_hash_manifest_mod);
 
     const e2e_tests = b.addTest(.{ .root_module = e2e_module });
     linkPlatformNetDeps(e2e_tests);
-    const e2e_run = b.addRunArtifact(e2e_tests);
 
-    // Provide absolute path to the e2e launcher and ensure it exists first.
+    const e2e_run = b.addRunArtifact(e2e_tests);
     e2e_run.setEnvironmentVariable("DOCZ_BIN", e2e_abs);
     e2e_run.step.dependOn(&e2e_install.step);
 
@@ -372,32 +417,8 @@ pub fn build(b: *std.Build) void {
     e2e_step.dependOn(&e2e_run.step);
 
     // ─────────────────────────────────────────────
-    // Aggregate: test-all
+    // Version helper (nice for CI logs)
     // ─────────────────────────────────────────────
-    const all_tests = b.step("test-all", "Run unit + integration + e2e tests");
-    all_tests.dependOn(unit_step);
-    all_tests.dependOn(integration_step);
-    all_tests.dependOn(e2e_step);
-    all_tests.dependOn(cli_unit_step);
-
-    // --- Vendor verification (HTTP-free) ---
-    const vendor_verify_mod = b.createModule(.{
-        .root_source_file = b.path("tools/vendor_verify_main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const vendor_verify_exe = b.addExecutable(.{
-        .name = "docz-vendor-verify",
-        .root_module = vendor_verify_mod,
-    });
-    const run_vendor_verify = b.addRunArtifact(vendor_verify_exe);
-    run_vendor_verify.step.dependOn(&vendor_verify_exe.step);
-    const step_vendor_verify = b.step("vendor-verify", "Verify third_party checksums (no HTTP)");
-    step_vendor_verify.dependOn(&run_vendor_verify.step);
-    // Ensure test-all runs vendor verification first
-    all_tests.dependOn(step_vendor_verify);
-
-    // --- Print version/build info ---
     const version_mod = b.createModule(.{
         .root_source_file = b.path("tools/print_version.zig"),
         .target = target,
@@ -407,9 +428,17 @@ pub fn build(b: *std.Build) void {
         .name = "docz-version",
         .root_module = version_mod,
     });
-    const run_version = b.addRunArtifact(version_exe);
     const step_version = b.step("version", "Print Docz build info");
-    step_version.dependOn(&run_version.step);
-    // Also run this before test-all so CI logs toolchain
+    step_version.dependOn(&b.addRunArtifact(version_exe).step);
+
+    // ─────────────────────────────────────────────
+    // Aggregate: test-all (ensure vendor verify & version print first)
+    // ─────────────────────────────────────────────
+    const all_tests = b.step("test-all", "Run unit + integration + e2e tests");
+    all_tests.dependOn(step_vendor_verify);
     all_tests.dependOn(step_version);
+    all_tests.dependOn(unit_step);
+    all_tests.dependOn(cli_unit_step);
+    all_tests.dependOn(integration_step);
+    all_tests.dependOn(e2e_step);
 }

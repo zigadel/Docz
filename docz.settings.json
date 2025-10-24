@@ -1,8 +1,63 @@
 {
   "root": ".",
-  "port": 5173,
-  "open": true,
-  "enable_katex": true,
-  "enable_tailwind": true,
-  "third_party_root": "third_party"
+
+  "preview": {
+    "host": "127.0.0.1",
+    "port": 0,
+    "open": true,
+    "strict_mime": true,
+    "compression": { "gzip": true, "brotli": false },
+    "cache": { "etag": true, "immutable_third_party": true }
+  },
+
+  "build": {
+    "out_dir": "out",
+    "hash_assets": true,
+    "integrity": "sha256",
+    "sourcemaps": true,
+    "katex": "server",
+    "minify_html": false
+  },
+
+  "third_party": {
+    "root": "third_party",
+    "katex_version": "0.16.22",
+    "tailwind_theme_glob": "tailwind/docz-theme-*/css/docz.tailwind.css"
+  },
+
+  "theme": {
+    "mode": "auto",
+    "path": null,
+    "prefer_vendored": true,
+    "fallback": "default"
+  },
+
+  "tailwind": {
+    "enabled": false,
+    "config": "tailwind.config.ts",
+    "input": "styles/docz.css",
+    "output": "themes/default/dist/docz.tailwind.css",
+    "postcss": "postcss.config.cjs"
+  },
+
+  "csp": {
+    "enabled": true,
+    "script_src": ["'self'"],
+    "style_src": ["'self'"],
+    "img_src": ["'self'", "data:"],
+    "object_src": ["'none'"],
+    "worker_src": ["'self'"],
+    "base_uri": ["'none'"],
+    "frame_ancestors": ["'none'"]
+  },
+
+  "wasm": {
+    "enabled": false,
+    "timeout_ms": 3000
+  },
+
+  "logging": {
+    "level": "info",
+    "json": false
+  }
 }

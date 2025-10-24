@@ -9,6 +9,7 @@ comptime {
     _ = @import("integration/latex_roundtrip.zig");
     _ = @import("integration/vendor_verify.zig");
     _ = @import("integration/web_preview_routes.zig");
+    _ = @import("integration/web_preview_http_features.zig");
 }
 
 test {

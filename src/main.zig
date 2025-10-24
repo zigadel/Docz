@@ -1,3 +1,5 @@
+// CLI entry point (docz)
+
 const std = @import("std");
 
 // Thin CLI dispatcher: each subcommand lives in src/cli/*.zig

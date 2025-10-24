@@ -111,6 +111,35 @@ fn loadFileSettings(alloc: std.mem.Allocator, path_opt: ?[]const u8) !FileSettin
 }
 
 // -----------------------------------------------------------------------------
+// URL helpers
+// -----------------------------------------------------------------------------
+
+fn isUnreserved(ch: u8) bool {
+    return (ch >= 'A' and ch <= 'Z') or (ch >= 'a' and ch <= 'z') or (ch >= '0' and ch <= '9') or ch == '-' or ch == '_' or ch == '.' or ch == '~' or ch == '/'; // keep slashes in path
+}
+
+fn urlEncode(alloc: std.mem.Allocator, s: []const u8) ![]u8 {
+    // Worst-case 3x expansion
+    var out = try alloc.alloc(u8, s.len * 3);
+    var j: usize = 0;
+
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        if (isUnreserved(c)) {
+            out[j] = c;
+            j += 1;
+        } else {
+            out[j + 0] = '%';
+            out[j + 1] = "0123456789ABCDEF"[(c >> 4) & 0xF];
+            out[j + 2] = "0123456789ABCDEF"[c & 0xF];
+            j += 3;
+        }
+    }
+    return alloc.realloc(out, j);
+}
+
+// -----------------------------------------------------------------------------
 // CLI
 // -----------------------------------------------------------------------------
 
@@ -185,12 +214,16 @@ pub fn run(alloc: std.mem.Allocator, it: *std.process.ArgIterator) !void {
 }
 
 fn openBrowser(alloc: std.mem.Allocator, port: u16, path: []const u8) !void {
-    const url = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}/{s}", .{ port, path });
+    // Always navigate via the view endpoint so Docz renders .dcz directly.
+    const enc = try urlEncode(alloc, path);
+    defer alloc.free(enc);
+
+    const url = try std.fmt.allocPrint(alloc, "http://127.0.0.1:{d}/view?path={s}", .{ port, enc });
     defer alloc.free(url);
 
     const os = @import("builtin").os.tag;
     const argv = switch (os) {
-        .windows => &[_][]const u8{ "cmd", "/c", "start", url },
+        .windows => &[_][]const u8{ "cmd", "/c", "start", "", url }, // empty title
         .macos => &[_][]const u8{ "open", url },
         else => &[_][]const u8{ "xdg-open", url },
     };

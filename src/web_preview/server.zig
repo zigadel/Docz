@@ -10,6 +10,67 @@ const Tokenizer = docz.Tokenizer;
 const Parser = docz.Parser;
 const Renderer = docz.Renderer;
 
+const LogMode = enum { plain, json };
+
+fn getenvOwnedOrNull(a: std.mem.Allocator, key: []const u8) ?[]u8 {
+    return std.process.getEnvVarOwned(a, key) catch |e| switch (e) {
+        error.EnvironmentVariableNotFound => null,
+        else => null,
+    };
+}
+
+fn chooseLogMode(a: std.mem.Allocator) LogMode {
+    if (getenvOwnedOrNull(a, "DOCZ_LOG")) |v| {
+        defer a.free(v);
+        if (std.ascii.eqlIgnoreCase(v, "json")) return .json;
+    }
+    return .plain;
+}
+
+fn jsonEscapeInto(buf: *std.ArrayListUnmanaged(u8), s: []const u8, A: std.mem.Allocator) !void {
+    // minimal escape: quotes, backslashes, and common control chars
+    for (s) |c| switch (c) {
+        '"' => try buf.appendSlice(A, "\\\""),
+        '\\' => try buf.appendSlice(A, "\\\\"),
+        '\n' => try buf.appendSlice(A, "\\n"),
+        '\r' => try buf.appendSlice(A, "\\r"),
+        '\t' => try buf.appendSlice(A, "\\t"),
+        else => try buf.append(A, c),
+    };
+}
+
+fn logServerJSON(event: []const u8, fields: []const struct { []const u8, []const u8 }) void {
+    // Build: {"ts":..., "ev":"...", "k":"v", ...}
+    var buf = std.ArrayListUnmanaged(u8){};
+    const A = std.heap.page_allocator;
+    defer buf.deinit(A);
+
+    const ts = std.time.milliTimestamp();
+
+    _ = buf.appendSlice(A, "{\"ts\":") catch return;
+
+    var ts_buf: [32]u8 = undefined;
+    const ts_s = std.fmt.bufPrint(&ts_buf, "{d}", .{ts}) catch return;
+    _ = buf.appendSlice(A, ts_s) catch return;
+
+    _ = buf.appendSlice(A, ",\"ev\":\"") catch return;
+    jsonEscapeInto(&buf, event, A) catch return;
+    _ = buf.appendSlice(A, "\"") catch return;
+
+    for (fields) |kv| {
+        _ = buf.appendSlice(A, ",\"") catch return;
+        _ = buf.appendSlice(A, kv[0]) catch return;
+        _ = buf.appendSlice(A, "\":\"") catch return;
+        jsonEscapeInto(&buf, kv[1], A) catch return;
+        _ = buf.appendSlice(A, "\"") catch return;
+    }
+
+    _ = buf.appendSlice(A, "}\n") catch return;
+
+    // In this Zig build, std.debug.print is the portable way to write to stderr.
+    std.debug.print("{s}", .{buf.items});
+}
+
 fn decU64(n: u64, buf: *[24]u8) []const u8 {
     return std.fmt.bufPrint(buf, "{d}", .{n}) catch unreachable;
 }
@@ -21,14 +82,20 @@ const Header = struct { name: []const u8, value: []const u8 };
 
 const Status = enum(u16) {
     ok = 200,
+    partial_content = 206,
     no_content = 204,
+    not_modified = 304,
+    range_not_satisfiable = 416,
     internal_server_error = 500,
 };
 
 fn statusReason(s: Status) []const u8 {
     return switch (s) {
         .ok => "OK",
+        .partial_content => "Partial Content",
         .no_content => "No Content",
+        .not_modified => "Not Modified",
+        .range_not_satisfiable => "Range Not Satisfiable",
         .internal_server_error => "Internal Server Error",
     };
 }
@@ -38,20 +105,12 @@ const RespondOpts = struct {
     extra_headers: []const Header = &.{},
 };
 
-const DEFAULT_SEC_HEADERS: []const Header = &.{
-    .{ .name = "X-Content-Type-Options", .value = "nosniff" },
-    .{ .name = "X-Frame-Options", .value = "DENY" },
-    .{ .name = "Referrer-Policy", .value = "no-referrer" },
-    .{ .name = "Cross-Origin-Opener-Policy", .value = "same-origin" },
-    .{ .name = "Cross-Origin-Embedder-Policy", .value = "require-corp" },
-    .{ .name = "Content-Security-Policy", .value = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; connect-src 'self'" },
-};
-
 const Request = struct {
     allocator: std.mem.Allocator,
     stream: *std.net.Stream,
     method: []const u8,
     target: []const u8,
+    headers: []const u8, // raw header bytes including final CRLFCRLF (best-effort)
 
     fn respond(self: *Request, body: []const u8, opts: RespondOpts) !void {
         const code = @intFromEnum(opts.status);
@@ -77,7 +136,11 @@ const Request = struct {
         }
 
         try streamWriteAllCompat(self.stream, "Connection: close\r\n\r\n");
-        try streamWriteAllCompat(self.stream, body);
+
+        // HEAD: advertise length but do not send body
+        if (!std.mem.eql(u8, self.method, "HEAD")) {
+            try streamWriteAllCompat(self.stream, body);
+        }
     }
 };
 
@@ -128,26 +191,21 @@ fn readStreamCompat(stream: *std.net.Stream, buf: []u8) !usize {
     }
 }
 
-// ---- Hardened request reader: tolerate Windows' transient error.Unexpected
+// ---- Minimal request reader (first line + best-effort headers), tolerant on Windows
 fn receiveRequest(alloc: std.mem.Allocator, stream: *std.net.Stream) !Request {
-    var hdr = std.ArrayList(u8){};
-    errdefer hdr.deinit(alloc);
+    var buf: std.ArrayListUnmanaged(u8) = .{};
+    errdefer buf.deinit(alloc);
 
     const max_header_bytes: usize = 64 * 1024;
     const start_ms = std.time.milliTimestamp();
     const retry_budget_ms: i64 = 1800;
 
+    // Read until we at least have a first line
     var have_first_line = false;
-
-    while (!have_first_line and hdr.items.len < max_header_bytes) {
+    while (!have_first_line and buf.items.len < max_header_bytes) {
         var tmp: [2048]u8 = undefined;
-
         const n = readStreamCompat(stream, tmp[0..]) catch |e| switch (e) {
-            error.WouldBlock,
-            error.Interrupted,
-            error.ConnectionResetByPeer,
-            error.Unexpected,
-            => {
+            error.WouldBlock, error.Interrupted, error.ConnectionResetByPeer, error.Unexpected => {
                 if (std.time.milliTimestamp() - start_ms < retry_budget_ms) {
                     std.Thread.sleep(150 * std.time.ns_per_ms);
                     continue;
@@ -155,21 +213,16 @@ fn receiveRequest(alloc: std.mem.Allocator, stream: *std.net.Stream) !Request {
                 return error.BadRequest;
             },
         };
-
         if (n == 0) break;
-
-        try hdr.appendSlice(alloc, tmp[0..n]);
-
-        if (std.mem.indexOfScalar(u8, hdr.items, '\n') != null) {
-            have_first_line = true;
-        }
+        try buf.appendSlice(alloc, tmp[0..n]);
+        if (std.mem.indexOfScalar(u8, buf.items, '\n') != null) have_first_line = true;
     }
+    if (buf.items.len == 0) return error.BadRequest;
 
-    if (hdr.items.len == 0) return error.BadRequest;
-
-    const nl_i_opt = std.mem.indexOfScalar(u8, hdr.items, '\n');
-    const line_end = nl_i_opt orelse hdr.items.len;
-    const line_raw = hdr.items[0..line_end];
+    // Split out first line
+    const nl_i_opt = std.mem.indexOfScalar(u8, buf.items, '\n');
+    const line_end = nl_i_opt orelse buf.items.len;
+    const line_raw = buf.items[0..line_end];
     const first = if (line_raw.len > 0 and line_raw[line_raw.len - 1] == '\r')
         line_raw[0 .. line_raw.len - 1]
     else
@@ -179,16 +232,43 @@ fn receiveRequest(alloc: std.mem.Allocator, stream: *std.net.Stream) !Request {
     const m = it.next() orelse "GET";
     const t = it.next() orelse "/";
 
+    // If we didn't already capture CRLFCRLF, keep reading headers
+    var have_end = std.mem.endsWith(u8, buf.items, "\r\n\r\n");
+    while (!have_end and buf.items.len < max_header_bytes) {
+        var tmp2: [2048]u8 = undefined;
+        const n2 = readStreamCompat(stream, tmp2[0..]) catch |e| switch (e) {
+            error.WouldBlock, error.Interrupted, error.ConnectionResetByPeer, error.Unexpected => {
+                if (std.time.milliTimestamp() - start_ms < retry_budget_ms) {
+                    std.Thread.sleep(100 * std.time.ns_per_ms);
+                    continue;
+                }
+                break; // best-effort; we'll parse what we have
+            },
+        };
+        if (n2 == 0) break;
+        try buf.appendSlice(alloc, tmp2[0..n2]);
+        have_end = std.mem.indexOf(u8, buf.items, "\r\n\r\n") != null;
+    }
+
+    // Extract raw header bytes AFTER the first line up to CRLFCRLF (if present)
+    var headers_slice: []const u8 = &.{};
+    if (std.mem.indexOf(u8, buf.items, "\r\n\r\n")) |end_hdr| {
+        if (line_end < end_hdr + 4 and line_end + 1 <= buf.items.len) {
+            const start_hdr = line_end + 1; // after LF
+            headers_slice = try alloc.dupe(u8, buf.items[start_hdr .. end_hdr + 4]);
+        }
+    }
+
     const method = try alloc.dupe(u8, m);
     const target = try alloc.dupe(u8, t);
-
-    hdr.deinit(alloc);
+    buf.deinit(alloc);
 
     return .{
         .allocator = alloc,
         .stream = stream,
         .method = method,
         .target = target,
+        .headers = headers_slice,
     };
 }
 
@@ -200,8 +280,8 @@ pub const PreviewServer = struct {
     allocator: std.mem.Allocator,
     doc_root: []const u8,
     broadcaster: hot.Broadcaster,
-    // TEST-ONLY stop flag to exit the accept loop gracefully
-    stop_requested: bool = false,
+    stop_requested: bool = false, // TEST-ONLY stop flag to exit the accept loop gracefully
+    log_mode: LogMode = .plain,
 
     pub fn init(allocator: std.mem.Allocator, doc_root: []const u8) !PreviewServer {
         const trimmed = try trimTrailingSlash(allocator, doc_root);
@@ -210,6 +290,7 @@ pub const PreviewServer = struct {
             .allocator = allocator,
             .doc_root = trimmed,
             .broadcaster = hot.Broadcaster.init(allocator),
+            .log_mode = chooseLogMode(allocator),
         };
     }
 
@@ -223,10 +304,35 @@ pub const PreviewServer = struct {
         var tcp = try std.net.Address.listen(addr, .{ .reuse_address = true });
         defer tcp.deinit();
 
-        std.debug.print("🔎 web-preview listening on http://127.0.0.1:{d}\n", .{port});
+        switch (self.log_mode) {
+            .plain => std.debug.print("🔎 web-preview listening on http://127.0.0.1:{d}\n", .{port}),
+            .json => logServerJSON("listen", &.{
+                .{ "addr", "127.0.0.1" },
+                .{ "port", blk: {
+                    var b: [24]u8 = undefined;
+                    break :blk std.fmt.bufPrint(&b, "{d}", .{port}) catch "0";
+                } },
+            }),
+        }
+
+        // --- TEST-ONLY: auto-stop after N ms if env var is set --------------
+        const ms_opt: ?[]u8 = std.process.getEnvVarOwned(self.allocator, "DOCZ_TEST_AUTOSTOP_MS") catch null;
+        if (ms_opt) |ms_s| {
+            defer self.allocator.free(ms_s);
+            const ms = std.fmt.parseInt(u64, ms_s, 10) catch 0;
+            if (ms > 0) {
+                _ = std.Thread.spawn(.{}, struct {
+                    fn run(srv: *PreviewServer, p: u16, delay_ms: u64) void {
+                        std.Thread.sleep(delay_ms * std.time.ns_per_ms);
+                        srv.stop_requested = true;
+                        pokeSelf(p) catch {};
+                    }
+                }.run, .{ self, port, ms }) catch {};
+            }
+        }
 
         // Hot-reload poller (best-effort)
-        _ = try std.Thread.spawn(.{}, pollFileAndBroadcast, .{ &self.broadcaster, "docs/SPEC.dcz", 250 });
+        _ = std.Thread.spawn(.{}, pollFileAndBroadcast, .{ &self.broadcaster, "docs/SPEC.dcz", 250 }) catch {};
 
         while (true) {
             const net_conn = tcp.accept() catch |e| switch (e) {
@@ -244,6 +350,7 @@ pub const PreviewServer = struct {
             defer {
                 self.allocator.free(req.method);
                 self.allocator.free(req.target);
+                if (req.headers.len != 0) self.allocator.free(req.headers);
             }
 
             const path = req.target;
@@ -265,7 +372,6 @@ pub const PreviewServer = struct {
                 }) catch {};
             };
 
-            // NEW: break out when tests ask us to stop.
             if (self.stop_requested) break;
         }
     }
@@ -286,6 +392,16 @@ pub const PreviewServer = struct {
             });
         }
 
+        // simple diagnostics endpoint for CI/health checks
+        if (std.mem.eql(u8, stripQuery(path), "/healthz")) {
+            const body = try std.fmt.allocPrint(self.allocator, "{{\"ok\":true,\"doc_root\":\"{s}\"}}", .{self.doc_root});
+            defer self.allocator.free(body);
+            return req.respond(body, .{
+                .status = .ok,
+                .extra_headers = &.{.{ .name = "Content-Type", .value = "application/json; charset=utf-8" }},
+            });
+        }
+
         if (std.mem.eql(u8, stripQuery(path), "/favicon.ico")) {
             return req.respond("", .{
                 .status = .no_content,
@@ -293,7 +409,7 @@ pub const PreviewServer = struct {
             });
         }
 
-        // NEW: test-only shutdown endpoint—flip flag so accept loop exits.
+        // test-only shutdown endpoint—flip flag so accept loop exits.
         if (std.mem.eql(u8, stripQuery(path), "/__docz_stop")) {
             self.stop_requested = true;
             return req.respond("stopping\n", .{
@@ -486,25 +602,77 @@ pub const PreviewServer = struct {
 
         const stat = try file.stat();
 
+        // Read file (simple, fine for tests and small assets)
         const body = try self.allocator.alloc(u8, stat.size);
         defer self.allocator.free(body);
-
         const n = try file.readAll(body);
-        const ctype = mimeFromPath(abs_path);
 
+        const ctype = mimeFromPath(abs_path);
         const is_third_party =
             std.mem.indexOf(u8, abs_path, "third_party/") != null or
             std.mem.startsWith(u8, abs_path, "third_party/");
-
         const cache_header =
             if (is_third_party) "public, max-age=31536000, immutable" else "no-cache";
 
-        return req.respond(body[0..n], .{
-            .status = .ok,
-            .extra_headers = &.{
-                .{ .name = "Content-Type", .value = ctype },
-                .{ .name = "Cache-Control", .value = cache_header },
-            },
+        // Weak ETag based on mtime + size
+        const mtime_u64: u64 = @intCast(stat.mtime);
+        const etag = try std.fmt.allocPrint(self.allocator, "W/\"{x}-{d}\"", .{ mtime_u64, stat.size });
+        defer self.allocator.free(etag);
+
+        // 304 Not Modified if client ETag matches
+        if (headerValue(req.headers, "If-None-Match")) |inm| {
+            if (std.mem.eql(u8, inm, etag)) {
+                const extra_304 = [_]Header{
+                    .{ .name = "ETag", .value = etag },
+                    .{ .name = "Cache-Control", .value = cache_header },
+                };
+                return req.respond("", .{
+                    .status = .not_modified,
+                    .extra_headers = &extra_304,
+                });
+            }
+        }
+
+        // Single-range support
+        var status: Status = .ok;
+        var send_slice: []const u8 = body[0..n];
+        var extra_headers: [5]Header = .{
+            .{ .name = "Content-Type", .value = ctype },
+            .{ .name = "Cache-Control", .value = cache_header },
+            .{ .name = "ETag", .value = etag },
+            .{ .name = "Accept-Ranges", .value = "bytes" },
+            .{ .name = "Content-Range", .value = "" }, // only set for 206/416
+        };
+        var extra_len: usize = 4; // append Content-Range if used
+
+        if (headerValue(req.headers, "Range")) |rng| {
+            if (parseSingleRange(rng, @intCast(n))) |r| {
+                const lo: usize = @intCast(r.start);
+                const hi: usize = @intCast(r.end);
+                if (lo <= hi and hi < n) {
+                    send_slice = body[lo .. hi + 1];
+                    const cr = try std.fmt.allocPrint(self.allocator, "bytes {d}-{d}/{d}", .{ r.start, r.end, n });
+                    defer self.allocator.free(cr);
+                    extra_headers[4] = .{ .name = "Content-Range", .value = cr };
+                    extra_len = 5;
+                    status = .partial_content;
+                }
+            } else {
+                // Invalid or unsatisfiable → 416
+                const cr_all = try std.fmt.allocPrint(self.allocator, "bytes */{d}", .{n});
+                defer self.allocator.free(cr_all);
+                extra_headers[4] = .{ .name = "Content-Range", .value = cr_all };
+                extra_len = 5;
+                return req.respond("", .{
+                    .status = .range_not_satisfiable,
+                    .extra_headers = extra_headers[0..extra_len],
+                });
+            }
+        }
+
+        return req.respond(send_slice, .{
+            .status = status,
+            .extra_headers = extra_headers[0..extra_len],
         });
     }
 };
@@ -513,6 +681,79 @@ pub const PreviewServer = struct {
 // Helpers
 // ----------------------------
 
+fn headerValueCI(headers: []const u8, name: []const u8) ?[]const u8 {
+    var it = std.mem.splitScalar(u8, headers, '\n');
+    while (it.next()) |line_with_cr| {
+        const line = if (line_with_cr.len > 0 and line_with_cr[line_with_cr.len - 1] == '\r')
+            line_with_cr[0 .. line_with_cr.len - 1]
+        else
+            line_with_cr;
+
+        if (line.len < name.len + 1) continue; // needs at least "name:"
+        if (!std.ascii.startsWithIgnoreCase(line, name)) continue;
+        if (line[name.len] != ':') continue;
+
+        var v = line[name.len + 1 ..]; // after ':'
+        while (v.len > 0 and (v[0] == ' ' or v[0] == '\t')) v = v[1..];
+        return v;
+    }
+    return null;
+}
+
+fn headerValue(headers: []const u8, name_ci: []const u8) ?[]const u8 {
+    if (headers.len == 0) return null;
+    var it = std.mem.splitScalar(u8, headers, '\n');
+    while (it.next()) |line_with_cr| {
+        var line = line_with_cr;
+        if (line.len == 0) continue;
+        if (line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const key = line[0..colon];
+        if (std.ascii.eqlIgnoreCase(key, name_ci)) {
+            var v = line[colon + 1 ..];
+            while (v.len > 0 and (v[0] == ' ' or v[0] == '\t')) v = v[1..];
+            return v;
+        }
+    }
+    return null;
+}
+
+const Range = struct { start: u64, end: u64 }; // inclusive
+
+fn parseSingleRange(hval: []const u8, size: u64) ?Range {
+    // Expect: "bytes=<start>-<end>" with either side optionally blank (suffix)
+    if (!std.mem.startsWith(u8, hval, "bytes=")) return null;
+    const spec = hval[6..];
+
+    const dash = std.mem.indexOfScalar(u8, spec, '-') orelse return null;
+    const a = spec[0..dash];
+    const b = spec[dash + 1 ..];
+
+    if (a.len == 0 and b.len == 0) return null;
+
+    if (a.len == 0) {
+        // suffix: last N bytes
+        const n = std.fmt.parseInt(u64, b, 10) catch return null;
+        if (n == 0) return null;
+        const start: u64 = if (n >= size) 0 else size - n;
+        const end: u64 = if (size == 0) 0 else size - 1;
+        if (start > end) return null;
+        return .{ .start = start, .end = end };
+    } else {
+        const start = std.fmt.parseInt(u64, a, 10) catch return null;
+        const end: u64 = if (b.len == 0)
+            (if (size == 0) 0 else size - 1)
+        else
+            (std.fmt.parseInt(u64, b, 10) catch return null);
+
+        if (start >= size) return null;
+        if (end < start) return null;
+
+        const clamped_end = if (end >= size) size - 1 else end;
+        return .{ .start = start, .end = clamped_end };
+    }
+}
+
 fn trimTrailingSlash(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
     var end = s.len;
     while (end > 0 and s[end - 1] == '/') end -= 1;
@@ -520,12 +761,12 @@ fn trimTrailingSlash(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
 }
 
 fn sanitizePath(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
-    var norm = std.ArrayList(u8){};
+    var norm = std.ArrayListUnmanaged(u8){};
     defer norm.deinit(allocator);
     try norm.ensureTotalCapacity(allocator, raw.len);
     for (raw) |c| try norm.append(allocator, if (c == '\\') '/' else c);
 
-    var segs = std.ArrayList([]const u8){};
+    var segs = std.ArrayListUnmanaged([]const u8){};
     defer segs.deinit(allocator);
 
     var it = std.mem.splitScalar(u8, norm.items, '/');
@@ -550,7 +791,7 @@ fn sanitizePath(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
         depth += 1;
     }
 
-    var out = std.ArrayList(u8){};
+    var out = std.ArrayListUnmanaged(u8){};
     defer out.deinit(allocator);
     var first = true;
     for (segs.items) |seg| {
@@ -578,8 +819,8 @@ fn fileExists(abs_path: []const u8) bool {
 }
 
 fn mimeFromPath(path: []const u8) []const u8 {
-    if (std.mem.endsWith(u8, path, ".html")) return "text/html; charset=utf-8";
-    if (std.mem.endsWith(u8, path, ".htm")) return "text/html; charset=utf-8";
+    if (std.mem.endsWith(u8, path, ".html") or std.mem.endsWith(u8, path, ".htm"))
+        return "text/html; charset=utf-8";
     if (std.mem.endsWith(u8, path, ".css")) return "text/css; charset=utf-8";
     if (std.mem.endsWith(u8, path, ".js")) return "text/javascript; charset=utf-8";
     if (std.mem.endsWith(u8, path, ".json")) return "application/json; charset=utf-8";
@@ -588,6 +829,14 @@ fn mimeFromPath(path: []const u8) []const u8 {
     if (std.mem.endsWith(u8, path, ".jpg") or std.mem.endsWith(u8, path, ".jpeg")) return "image/jpeg";
     if (std.mem.endsWith(u8, path, ".gif")) return "image/gif";
     if (std.mem.endsWith(u8, path, ".txt")) return "text/plain; charset=utf-8";
+
+    // useful extras
+    if (std.mem.endsWith(u8, path, ".ico")) return "image/x-icon";
+    if (std.mem.endsWith(u8, path, ".webp")) return "image/webp";
+    if (std.mem.endsWith(u8, path, ".woff2")) return "font/woff2";
+    if (std.mem.endsWith(u8, path, ".map")) return "application/json; charset=utf-8";
+    if (std.mem.endsWith(u8, path, ".wasm")) return "application/wasm";
+
     return "application/octet-stream";
 }
 
@@ -708,4 +957,11 @@ fn buildIndexHtml(allocator: std.mem.Allocator) ![]u8 {
         \\</html>
     ;
     return allocator.dupe(u8, tpl);
+}
+
+// Wake up accept() by making a quick local connection.
+fn pokeSelf(port: u16) !void {
+    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
+    var sock = try std.net.tcpConnectToAddress(addr);
+    sock.close();
 }
