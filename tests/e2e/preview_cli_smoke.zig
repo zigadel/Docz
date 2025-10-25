@@ -1,4 +1,5 @@
 const std = @import("std");
+const web = @import("web_preview");
 
 // ---- small helpers ---------------------------------------------------------
 
@@ -59,7 +60,7 @@ test "docz preview CLI smoke: starts, serves /healthz, stops" {
     defer std.debug.assert(gpa.deinit() == .ok);
     const A = gpa.allocator();
 
-    const port: u16 = 5181;
+    const port: u16 = try web.findFreePort();
 
     // Build argv: docz preview --no-open --port <port>
     var port_buf: [16]u8 = undefined;

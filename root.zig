@@ -17,7 +17,7 @@ const html_export = @import("html_export");
 pub const renderer = struct {
     pub const inline_ = struct {
         pub const renderInline =
-            @import("src/convert/inline/renderer.zig").renderInline;
+            @import("src/renderer/inline.zig").renderInline;
     };
 
     pub const html = struct {
@@ -32,7 +32,7 @@ pub const renderer = struct {
 // ── Canonical top-level symbols (back-compat) --------------------------------
 // Some older call sites use these names directly.
 pub const Renderer = @import("src/renderer/html.zig");
-pub const InlineRenderer = @import("src/convert/inline/renderer.zig");
+pub const InlineRenderer = @import("src/renderer/inline.zig");
 
 // ── Embedded assets (paths are relative to repo root) -----------------------
 pub const assets = struct {

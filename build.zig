@@ -26,6 +26,23 @@ pub fn build(b: *std.Build) void {
     build_opts.addOption(bool, "verbose_tests", verbose_tests);
 
     // ─────────────────────────────────────────────
+    // Utility modules (declare EARLY so everyone can import them)
+    // ─────────────────────────────────────────────
+    const utils_fs_mod = b.createModule(.{
+        .root_source_file = b.path("src/utils/fs.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    utils_fs_mod.addOptions("build_options", build_opts);
+
+    const utils_hash_manifest_mod = b.createModule(.{
+        .root_source_file = b.path("src/utils/hash_manifest.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    utils_hash_manifest_mod.addOptions("build_options", build_opts);
+
+    // ─────────────────────────────────────────────
     // Public library surface (root.zig is API entry)
     // ─────────────────────────────────────────────
     const docz_module = b.createModule(.{
@@ -71,6 +88,7 @@ pub fn build(b: *std.Build) void {
     web_preview_mod.addImport("web_preview_hot", web_preview_hot_mod);
     web_preview_mod.addImport("web_preview_limits", web_preview_limits_mod);
     web_preview_mod.addImport("web_preview_timeout", web_preview_timeout_mod);
+    web_preview_mod.addImport("utils_fs", utils_fs_mod);
 
     // ─────────────────────────────────────────────
     // CLI root module
@@ -103,6 +121,8 @@ pub fn build(b: *std.Build) void {
     });
     html_export_mod.addOptions("build_options", build_opts);
     html_export_mod.addImport("docz", docz_module);
+    // html export uses utils_fs helpers
+    html_export_mod.addImport("utils_fs", utils_fs_mod);
 
     // root.zig does: @import("html_export")
     docz_module.addImport("html_export", html_export_mod);
@@ -148,16 +168,6 @@ pub fn build(b: *std.Build) void {
     cli_root_module.addImport("latex_export", latex_export_mod);
 
     // ─────────────────────────────────────────────
-    // Utility modules (exposed to tests)
-    // ─────────────────────────────────────────────
-    const util_hash_manifest_mod = b.createModule(.{
-        .root_source_file = b.path("src/util/hash_manifest.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    util_hash_manifest_mod.addOptions("build_options", build_opts);
-
-    // ─────────────────────────────────────────────
     // Tools: vendor (module + exe) and vendor-verify (HTTP-free)
     // ─────────────────────────────────────────────
     const vendor_mod = b.createModule(.{
@@ -165,6 +175,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // tools/vendor.zig does @import("utils_fs")
+    vendor_mod.addImport("utils_fs", utils_fs_mod);
 
     const vendor_tool = b.addExecutable(.{
         .name = "docz-vendor",
@@ -178,6 +190,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // vendor_verify_main -> vendor_core.zig -> @import("utils_fs")
+    vendor_verify_mod.addImport("utils_fs", utils_fs_mod);
+
     const vendor_verify_exe = b.addExecutable(.{
         .name = "docz-vendor-verify",
         .root_module = vendor_verify_mod,
@@ -376,11 +391,12 @@ pub fn build(b: *std.Build) void {
     integration_module.addImport("vendor", vendor_mod);
     integration_module.addImport("web_preview", web_preview_mod);
     integration_module.addImport("web_preview_hot", web_preview_hot_mod);
-
+    // tests/integration/web_preview_routes.zig does @import("utils_fs")
+    integration_module.addImport("utils_fs", utils_fs_mod);
     // helpers visible to tests by module name
     integration_module.addImport("web_preview_limits", web_preview_limits_mod);
     integration_module.addImport("web_preview_timeout", web_preview_timeout_mod);
-    integration_module.addImport("util_hash_manifest", util_hash_manifest_mod);
+    integration_module.addImport("utils_hash_manifest", utils_hash_manifest_mod);
 
     const integration_tests = b.addTest(.{ .root_module = integration_module });
     linkPlatformNetDeps(integration_tests);
@@ -404,7 +420,10 @@ pub fn build(b: *std.Build) void {
     e2e_module.addImport("docz", docz_module);
     e2e_module.addImport("web_preview_limits", web_preview_limits_mod);
     e2e_module.addImport("web_preview_timeout", web_preview_timeout_mod);
-    e2e_module.addImport("util_hash_manifest", util_hash_manifest_mod);
+    e2e_module.addImport("utils_hash_manifest", utils_hash_manifest_mod);
+    // If e2e tests ever import utils_fs directly, keep this here (harmless otherwise)
+    e2e_module.addImport("utils_fs", utils_fs_mod);
+    e2e_module.addImport("web_preview", web_preview_mod);
 
     const e2e_tests = b.addTest(.{ .root_module = e2e_module });
     linkPlatformNetDeps(e2e_tests);

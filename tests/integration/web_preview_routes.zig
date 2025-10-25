@@ -1,15 +1,12 @@
 const std = @import("std");
 const server_mod = @import("web_preview");
+const utils_fs = @import("utils_fs");
+const web = @import("web_preview");
 
 // --- Tunables ---------------------------------------------------------------
 const BOOT_WAIT_SLICE_MS: u64 = 25; // small retry step while server boots
 const BOOT_BUDGET_MS: u64 = 6000; // give the server up to 6s to bind
 // ---------------------------------------------------------------------------
-
-fn fileExists(path: []const u8) bool {
-    _ = std.fs.cwd().statFile(path) catch return false;
-    return true;
-}
 
 // tiny/forgiving scanner for:  "key" : "value"
 fn findJsonStringValue(buf: []const u8, key: []const u8) ?[]const u8 {
@@ -65,21 +62,21 @@ fn readFilePrefixAlloc(a: std.mem.Allocator, path: []const u8, max_bytes: usize)
 /// Returns an allocator-owned string that the caller must free.
 fn findAnyThirdPartyAsset(a: std.mem.Allocator) !?[]const u8 {
     // Prefer the lock file produced by vendor tooling.
-    if (fileExists("third_party/VENDOR.lock")) {
+    if (utils_fs.fileExists("third_party/VENDOR.lock")) {
         const buf = try readFilePrefixAlloc(a, "third_party/VENDOR.lock", 64 * 1024);
         defer a.free(buf);
 
         if (findJsonStringValue(buf, "katex")) |ver| {
             const abs = try std.fs.path.join(a, &.{ "third_party", "katex", ver, "dist", "katex.min.css" });
             defer a.free(abs);
-            if (fileExists(abs)) {
+            if (utils_fs.fileExists(abs)) {
                 return try std.fmt.allocPrint(a, "/third_party/katex/{s}/dist/katex.min.css", .{ver});
             }
         }
         if (findJsonStringValue(buf, "tailwind")) |label| {
             const abs = try std.fs.path.join(a, &.{ "third_party", "tailwind", label, "css", "docz.tailwind.css" });
             defer a.free(abs);
-            if (fileExists(abs)) {
+            if (utils_fs.fileExists(abs)) {
                 return try std.fmt.allocPrint(a, "/third_party/tailwind/{s}/css/docz.tailwind.css", .{label});
             }
         }
@@ -99,7 +96,7 @@ fn findAnyThirdPartyAsset(a: std.mem.Allocator) !?[]const u8 {
 
             const abs = try std.fs.path.join(a, &.{ "third_party", "katex", e.name, "dist", "katex.min.css" });
             defer a.free(abs);
-            if (fileExists(abs)) {
+            if (utils_fs.fileExists(abs)) {
                 return try std.fmt.allocPrint(a, "/third_party/katex/{s}/dist/katex.min.css", .{e.name});
             }
         }
@@ -118,7 +115,7 @@ fn findAnyThirdPartyAsset(a: std.mem.Allocator) !?[]const u8 {
 
             const abs = try std.fs.path.join(a, &.{ "third_party", "tailwind", e.name, "css", "docz.tailwind.css" });
             defer a.free(abs);
-            if (fileExists(abs)) {
+            if (utils_fs.fileExists(abs)) {
                 return try std.fmt.allocPrint(a, "/third_party/tailwind/{s}/css/docz.tailwind.css", .{e.name});
             }
         }
@@ -175,7 +172,7 @@ test "preview serves third_party assets" {
     var srv = try server_mod.PreviewServer.init(A, ".");
     defer srv.deinit(); // ensure resources are released even if test fails
 
-    const port: u16 = 5179;
+    const port: u16 = try web.findFreePort();
     // Keep the thread handle so we can join it at teardown.
     var th = try std.Thread.spawn(.{}, server_mod.PreviewServer.listenAndServe, .{ &srv, port });
     defer th.join();

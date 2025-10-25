@@ -1,4 +1,5 @@
 const std = @import("std");
+const utils_fs = @import("utils_fs");
 
 /// Filesystem + hashing utilities extracted from your original tools/vendor.zig,
 /// trimmed to only what verifyAll() needs. No HTTP symbols.
@@ -91,7 +92,7 @@ pub fn verifyOne(a: std.mem.Allocator, base_abs: []const u8) !void {
     const cpath = try std.fs.path.join(a, &.{ base_abs, "CHECKSUMS.sha256" });
     defer a.free(cpath);
 
-    if (!fileExists(cpath)) {
+    if (!utils_fs.fileExists(cpath)) {
         std.debug.print("verify: skipped (no CHECKSUMS) {s}\n", .{base_abs});
         return;
     }
@@ -115,7 +116,7 @@ pub fn verifyOne(a: std.mem.Allocator, base_abs: []const u8) !void {
 
         const abs = try std.fs.path.join(a, &.{ base_abs, rel });
         defer a.free(abs);
-        if (!fileExists(abs)) {
+        if (!utils_fs.fileExists(abs)) {
             std.debug.print("missing: {s}\n", .{abs});
             return error.FileMissing;
         }
@@ -230,11 +231,6 @@ pub fn slurpFile(a: std.mem.Allocator, path: []const u8, max: usize) ![]u8 {
         try out.appendSlice(a, tmp[0..n]);
     }
     return try out.toOwnedSlice(a);
-}
-
-pub fn fileExists(abs: []const u8) bool {
-    _ = std.fs.cwd().access(abs, .{}) catch return false;
-    return true;
 }
 
 pub fn bytesToHexLower(a: std.mem.Allocator, bytes: []const u8) ![]u8 {

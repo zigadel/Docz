@@ -132,7 +132,7 @@ fn stopServer(port: u16) !void {
     defer s.close();
 
     const req =
-        "GET /__docz_stop HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+        "GET /__docz_stop HTTP/1.1\r\nHost: 127,0,0,1\r\nConnection: close\r\n\r\n";
 
     // fire-and-forget stop; no drain (avoids Windows ReadFile/recv weirdness)
     try writeAll(&s, req);
@@ -208,7 +208,7 @@ test "third_party assets get long immutable caching" {
     defer std.debug.assert(gpa.deinit() == .ok);
     const A = gpa.allocator();
 
-    const port: u16 = 5179;
+    const port: u16 = try web.findFreePort();
     var th = try startServer(A, port);
     defer th.join();
 
@@ -230,7 +230,7 @@ test "ETag + 304 roundtrip for third_party asset" {
     defer std.debug.assert(gpa.deinit() == .ok);
     const A = gpa.allocator();
 
-    const port: u16 = 5191;
+    const port = try web.findFreePort();
     var th = try startServer(A, port);
     defer th.join();
 
@@ -255,9 +255,8 @@ test "ETag + 304 roundtrip for third_party asset" {
 
 test "single Range request returns 206 and correct Content-Range" {
     if (builtin.os.tag == .windows) {
-        // This test is flaky on Windows due to stdlib socket quirks (ReadFile vs recv).
-        // Server behavior is correct; the client helper can hang in CI/Debug.
-        // Covered on non-Windows; safe to skip here.
+        // Keep skipped on Windows for now; we’ll replace the client with std.http.Client later
+        // and then unskip confidently.
         return;
     }
 
@@ -265,7 +264,7 @@ test "single Range request returns 206 and correct Content-Range" {
     defer std.debug.assert(gpa.deinit() == .ok);
     const A = gpa.allocator();
 
-    const port: u16 = 5192;
+    const port: u16 = try web.findFreePort();
     var th = try startServer(A, port);
     defer th.join();
 
@@ -292,10 +291,12 @@ test "HEAD on /ping suppresses body but reports length" {
     defer std.debug.assert(gpa.deinit() == .ok);
     const A = gpa.allocator();
 
-    const port: u16 = 5194;
+    const port: u16 = try web.findFreePort();
+
     var th = try startServer(A, port);
     defer th.join();
 
+    // next change (coming up): replace this sleep with waitForPort(port, 1000)
     std.Thread.sleep(150 * std.time.ns_per_ms);
 
     const r = try httpGet(A, port, "HEAD", "/ping", &.{});
@@ -304,9 +305,7 @@ test "HEAD on /ping suppresses body but reports length" {
     try std.testing.expectEqual(@as(u16, 200), r.status);
 
     const cl = headerValue(r.headers, "Content-Length") orelse return error.MissingHeader;
-    // Body should be empty on HEAD
     try std.testing.expectEqual(@as(usize, 0), r.body.len);
-    // Content-Length should parse to a number (we don't assert exact value)
     _ = std.fmt.parseInt(usize, cl, 10) catch return error.BadLength;
 
     try stopServer(port);

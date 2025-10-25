@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const utils_fs = @import("utils_fs");
 
 // Import sibling hot-reload as a module (not by relative path)
 const hot = @import("web_preview_hot");
@@ -272,6 +273,24 @@ fn receiveRequest(alloc: std.mem.Allocator, stream: *std.net.Stream) !Request {
     };
 }
 
+/// Test helper: find a free TCP port on 127.0.0.1 by probing the user-ephemeral range.
+pub fn findFreePort() !u16 {
+    var p: u32 = 49152;
+    while (p <= 65535) : (p += 1) {
+        const try_port: u16 = @intCast(p);
+        const addr_try = std.net.Address.parseIp4("127.0.0.1", try_port) catch continue;
+
+        // MUST be var, not const, so we can call deinit()
+        var probe = std.net.Address.listen(addr_try, .{ .reuse_address = true }) catch {
+            continue;
+        };
+        probe.deinit();
+
+        return try_port;
+    }
+    return error.AddressInUse;
+}
+
 // ----------------------------
 // Preview server
 // ----------------------------
@@ -297,6 +316,32 @@ pub const PreviewServer = struct {
     pub fn deinit(self: *PreviewServer) void {
         self.broadcaster.deinit();
         self.allocator.free(self.doc_root);
+    }
+
+    /// Like listenAndServe, but if `port` is 0 it will auto-select a free ephemeral port.
+    /// Returns the actual bound port. Useful for tests to avoid collisions.
+    pub fn listenAndServeAuto(self: *PreviewServer, port: u16) !u16 {
+        var chosen_port: u16 = port;
+        if (chosen_port == 0) {
+            // Choose an ephemeral port in the user range [49152..65535].
+            var p: u32 = 49152;
+            while (p <= 65535) : (p += 1) {
+                const try_port: u16 = @intCast(p);
+                const addr_try = std.net.Address.parseIp4("127.0.0.1", try_port) catch continue;
+                const this_test = std.net.Address.listen(addr_try, .{ .reuse_address = true }) catch {
+                    continue;
+                };
+                // Success: immediately close test listener and use this port for real.
+                this_test.deinit();
+                chosen_port = try_port;
+                break;
+            }
+            if (chosen_port == 0) return error.AddressInUse;
+        }
+
+        // Now run the canonical server loop on the chosen port.
+        try self.listenAndServe(chosen_port);
+        return chosen_port;
     }
 
     pub fn listenAndServe(self: *PreviewServer, port: u16) !void {
@@ -446,9 +491,9 @@ pub const PreviewServer = struct {
             return self.serveIndex(req);
         }
 
-        const candidate_a = try join2(self.allocator, self.doc_root, safe_rel);
+        const candidate_a = try utils_fs.join2Fs(self.allocator, self.doc_root, safe_rel);
         defer self.allocator.free(candidate_a);
-        if (fileExists(candidate_a)) {
+        if (utils_fs.fileExists(candidate_a)) {
             if (!std.mem.endsWith(u8, safe_rel, "__docz_hot.txt")) {
                 std.debug.print("  route=static hit={s}\n", .{candidate_a});
             }
@@ -457,9 +502,9 @@ pub const PreviewServer = struct {
 
         const rel_html = try withHtmlExt(self.allocator, safe_rel);
         defer self.allocator.free(rel_html);
-        const candidate_b = try join2(self.allocator, self.doc_root, rel_html);
+        const candidate_b = try utils_fs.join2Fs(self.allocator, self.doc_root, rel_html);
         defer self.allocator.free(candidate_b);
-        if (fileExists(candidate_b)) {
+        if (utils_fs.fileExists(candidate_b)) {
             std.debug.print("  route=static hit={s}\n", .{candidate_b});
             return self.serveFile(req, candidate_b);
         }
@@ -804,18 +849,6 @@ fn sanitizePath(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
 
 fn withHtmlExt(allocator: std.mem.Allocator, rel: []const u8) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}.html", .{rel});
-}
-
-fn join2(allocator: std.mem.Allocator, a: []const u8, b: []const u8) ![]const u8 {
-    if (a.len == 0) return allocator.dupe(u8, b);
-    if (b.len == 0) return allocator.dupe(u8, a);
-    if (a[a.len - 1] == '/') return std.fmt.allocPrint(allocator, "{s}{s}", .{ a, b });
-    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ a, b });
-}
-
-fn fileExists(abs_path: []const u8) bool {
-    std.fs.cwd().access(abs_path, .{}) catch return false;
-    return true;
 }
 
 fn mimeFromPath(path: []const u8) []const u8 {

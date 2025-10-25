@@ -1,4 +1,5 @@
 const std = @import("std");
+const utils_fs = @import("utils_fs");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -80,8 +81,10 @@ fn httpGetToFile(a: std.mem.Allocator, url: []const u8, dest_abs: []const u8) !v
     var redirects_left: u8 = 5;
 
     while (true) {
-        const current = try std.Uri.parse(current_url);        var req = try client.request(.GET, current, .{});
-        defer req.deinit();try req.wait();
+        const current = try std.Uri.parse(current_url);
+        var req = try client.request(.GET, current, .{});
+        defer req.deinit();
+        try req.wait();
 
         const code: u16 = @intFromEnum(req.response.status);
         const klass: u16 = code / 100;
@@ -179,11 +182,6 @@ fn writeTextFile(dest_abs: []const u8, body: []const u8) !void {
     var f = try std.fs.cwd().createFile(dest_abs, .{ .truncate = true });
     defer f.close();
     try f.writeAll(body);
-}
-
-fn fileExists(abs: []const u8) bool {
-    _ = std.fs.cwd().access(abs, .{}) catch return false;
-    return true;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -399,7 +397,7 @@ fn verifyOne(a: std.mem.Allocator, base_abs: []const u8) !void {
     const cpath = try std.fs.path.join(a, &.{ base_abs, "CHECKSUMS.sha256" });
     defer a.free(cpath);
 
-    if (!fileExists(cpath)) {
+    if (!utils_fs.fileExists(cpath)) {
         std.debug.print("verify: skipped (no CHECKSUMS) {s}\n", .{base_abs});
         return;
     }
@@ -423,7 +421,7 @@ fn verifyOne(a: std.mem.Allocator, base_abs: []const u8) !void {
 
         const abs = try std.fs.path.join(a, &.{ base_abs, rel });
         defer a.free(abs);
-        if (!fileExists(abs)) {
+        if (!utils_fs.fileExists(abs)) {
             std.debug.print("missing: {s}\n", .{abs});
             return error.FileMissing;
         }

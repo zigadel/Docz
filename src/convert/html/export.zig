@@ -4,6 +4,7 @@ const std = @import("std");
 // by the public "docz" module. We import docz for AST types and the inline
 // renderer pass.
 const docz = @import("docz");
+const utils_fs = @import("utils_fs"); // module name you wire in build.zig
 const AST = docz.AST;
 const ASTNode = AST.ASTNode;
 const NodeType = AST.NodeType;
@@ -241,10 +242,166 @@ pub fn exportHtml(doc: *const ASTNode, A: std.mem.Allocator) ![]u8 {
 
     const title_text = extractTitle(doc);
     try writeHeadStart(w, title_text, A);
+    try writeHeadMeta(doc, w, A);
+    if (shouldInjectDefaultStyles(doc)) {
+        try writeDefaultStyleFloor(w);
+    }
     try writeBodyFromAst(doc, w, A);
     try writeHeadEnd(w);
 
     return try buf.toOwnedSlice(A);
+}
+
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
+
+/// Emit <meta ...> tags based on @meta(...) nodes in the AST.
+/// Rules:
+/// - Title is handled elsewhere; skip it here.
+/// - If attributes contain ("name","content"), emit <meta name=".." content="..">
+/// - If attributes contain "author", emit <meta name="author" content="..">
+/// - If neither ("name","content") nor "author" is present but node.content is non-empty
+///   and there's a "name", use node.content as the value.
+fn writeHeadMeta(doc: *const ASTNode, w: anytype, A: std.mem.Allocator) !void {
+    for (doc.children.items) |node| {
+        if (node.node_type != .Meta) continue;
+
+        // Do NOT early-continue if there's a title; just avoid emitting it here.
+        // Title is handled by writeHeadStart().
+
+        // 1) Explicit author
+        if (node.attributes.get("author")) |author| {
+            const esc_val = try escapeHtml(A, author);
+            defer A.free(esc_val);
+            try w.print("    <meta name=\"author\" content=\"{s}\">\n", .{esc_val});
+        }
+
+        // 2) Generic name/content
+        if (node.attributes.get("name")) |n| {
+            // skip title here (title handled separately)
+            if (!std.ascii.eqlIgnoreCase(n, "title")) {
+                if (node.attributes.get("content")) |c| {
+                    const esc_n = try escapeHtml(A, n);
+                    const esc_c = try escapeHtml(A, c);
+                    defer {
+                        A.free(esc_n);
+                        A.free(esc_c);
+                    }
+                    try w.print("    <meta name=\"{s}\" content=\"{s}\">\n", .{ esc_n, esc_c });
+                } else if (node.content.len != 0) {
+                    const esc_n = try escapeHtml(A, n);
+                    const esc_c = try escapeHtml(A, node.content);
+                    defer {
+                        A.free(esc_n);
+                        A.free(esc_c);
+                    }
+                    try w.print("    <meta name=\"{s}\" content=\"{s}\">\n", .{ esc_n, esc_c });
+                }
+            }
+        }
+    }
+}
+
+fn shouldInjectDefaultStyles(doc: *const ASTNode) bool {
+    // Local tiny helper: treat common strings as truthy
+    const TRUTHY = struct {
+        fn is(v: []const u8) bool {
+            return std.ascii.eqlIgnoreCase(v, "true") or
+                std.ascii.eqlIgnoreCase(v, "on") or
+                std.ascii.eqlIgnoreCase(v, "1") or
+                std.ascii.eqlIgnoreCase(v, "yes") or
+                std.ascii.eqlIgnoreCase(v, "y");
+        }
+    };
+
+    for (doc.children.items) |node| {
+        if (node.node_type != .Meta) continue;
+
+        // 1) Explicit ergonomic flag: @meta(default_styles:"true")
+        if (node.attributes.get("default_styles")) |v| {
+            if (TRUTHY.is(v)) return true;
+        }
+        // Common alias: @meta(enable_default_styles:"true")
+        if (node.attributes.get("enable_default_styles")) |v| {
+            if (TRUTHY.is(v)) return true;
+        }
+
+        // 2) HTML-ish pattern: @meta(name:"docz-default-styles", content:"on")
+        if (node.attributes.get("name")) |n| {
+            const is_default =
+                std.ascii.eqlIgnoreCase(n, "docz-default-styles") or
+                std.ascii.eqlIgnoreCase(n, "default-styles") or
+                std.ascii.eqlIgnoreCase(n, "enable-default-styles");
+            if (is_default) {
+                const v = node.attributes.get("content") orelse node.content;
+                if (v.len == 0) return true; // presence → on
+                if (TRUTHY.is(v)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn writeDefaultStylesHead(w: anytype) !void {
+    // Prefer a reusable project stylesheet if present:
+    //   docz/assets/css/docz.core.css  →  served at /docz/assets/css/docz.core.css
+    if (utils_fs.Fs.exists("assets/css/docz.core.css") or utils_fs.Fs.exists("docz/assets/css/docz.core.css")) {
+        if (utils_fs.Fs.exists("docz/assets/css/docz.core.css")) {
+            try w.writeAll("    <link rel=\"stylesheet\" href=\"/docz/assets/css/docz.core.css\" data-docz=\"default-floor\" crossorigin=\"anonymous\">\n");
+        } else {
+            try w.writeAll("    <link rel=\"stylesheet\" href=\"/assets/css/docz.core.css\" data-docz=\"default-floor\" crossorigin=\"anonymous\">\n");
+        }
+        return;
+    }
+
+    // Fallback: inline tiny floor (unchanged)
+    try w.writeAll(
+        \\    <style data-docz="default-floor">
+        \\      /* docz-default-floor */
+        \\      :root { --docz-font: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"; }
+        \\      html { line-height: 1.5; }
+        \\      body { margin: 2rem auto; max-width: 72ch; padding: 0 1rem; font-family: var(--docz-font); color: #111; background: #fff; }
+        \\      h1,h2,h3,h4,h5,h6 { line-height: 1.25; margin: 1.5em 0 0.6em; font-weight: 700; }
+        \\      h1 { font-size: 2.25rem; }  h2 { font-size: 1.75rem; }  h3 { font-size: 1.375rem; }
+        \\      h4 { font-size: 1.125rem; } h5,h6 { font-size: 1rem; }
+        \\      p { margin: 0.9em 0; }
+        \\      a { color: #2563eb; text-decoration: none; }
+        \\      a:hover { text-decoration: underline; }
+        \\      code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 0.95em; background: #f6f8fa; padding: 0.15em 0.35em; border-radius: 4px; }
+        \\      pre { background: #0b1020; color: #e6edf3; padding: 0.9rem 1rem; border-radius: 6px; overflow: auto; }
+        \\      pre code { background: transparent; padding: 0; }
+        \\      ul,ol { margin: 0.9em 0; padding-left: 1.5em; }
+        \\      blockquote { margin: 1em 0; padding-left: 1em; border-left: 3px solid #e5e7eb; color: #374151; }
+        \\      .math { margin: 1em 0; }
+        \\    </style>
+        \\ 
+    );
+}
+
+fn writeDefaultStyleFloor(w: anytype) !void {
+    // Keep tiny & opinionated; users can override with their own CSS or Tailwind.
+    try w.writeAll(
+        \\    <style data-docz="default-floor">
+        \\      /* docz-default-floor */
+        \\      :root { --docz-font: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"; }
+        \\      html { line-height: 1.5; }
+        \\      body { margin: 2rem auto; max-width: 72ch; padding: 0 1rem; font-family: var(--docz-font); color: #111; background: #fff; }
+        \\      h1,h2,h3,h4,h5,h6 { line-height: 1.25; margin: 1.5em 0 0.6em; font-weight: 700; }
+        \\      h1 { font-size: 2.25rem; }  h2 { font-size: 1.75rem; }  h3 { font-size: 1.375rem; }
+        \\      h4 { font-size: 1.125rem; } h5,h6 { font-size: 1rem; }
+        \\      p { margin: 0.9em 0; }
+        \\      a { color: #2563eb; text-decoration: none; }
+        \\      a:hover { text-decoration: underline; }
+        \\      code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 0.95em; background: #f6f8fa; padding: 0.15em 0.35em; border-radius: 4px; }
+        \\      pre { background: #0b1020; color: #e6edf3; padding: 0.9rem 1rem; border-radius: 6px; overflow: auto; }
+        \\      pre code { background: transparent; padding: 0; }
+        \\      ul,ol { margin: 0.9em 0; padding-left: 1.5em; }
+        \\      blockquote { margin: 1em 0; padding-left: 1em; border-left: 3px solid #e5e7eb; color: #374151; }
+        \\      .math { margin: 1em 0; }
+        \\    </style>
+        \\ 
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -361,4 +518,68 @@ test "css helpers: collect + strip first style block" {
     defer A.free(stripped);
     try std.testing.expect(std.mem.indexOf(u8, stripped, "/* one */") == null);
     try std.testing.expect(std.mem.indexOf(u8, stripped, "/* two */") != null);
+}
+
+test "exportHtml: meta author appears in <head>" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    var root = ASTNode.init(A, NodeType.Document);
+    defer root.deinit(A);
+
+    {
+        var m = ASTNode.init(A, NodeType.Meta);
+        // typical @meta(title:"...", author:"...") mapping
+        try m.attributes.put("title", "Docz Title");
+        try m.attributes.put("author", "Docz Authors");
+        try root.children.append(A, m);
+    }
+    {
+        var h = ASTNode.init(A, NodeType.Heading);
+        try h.attributes.put("level", "1");
+        h.content = "Docz Title";
+        try root.children.append(A, h);
+    }
+
+    const html = try exportHtml(&root, A);
+    defer A.free(html);
+
+    try std.testing.expect(std.mem.indexOf(u8, html, "<title>Docz Title</title>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "<meta name=\"author\" content=\"Docz Authors\">") != null);
+}
+
+test "exportHtml: opt-in default styles injects CSS floor" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    var root = ASTNode.init(A, NodeType.Document);
+    defer root.deinit(A);
+
+    // opt-in meta
+    {
+        var m = ASTNode.init(A, NodeType.Meta);
+        try m.attributes.put("name", "docz-default-styles");
+        try m.attributes.put("content", "on");
+        try root.children.append(A, m);
+    }
+    // some content
+    {
+        var h = ASTNode.init(A, NodeType.Heading);
+        try h.attributes.put("level", "1");
+        h.content = "Hello";
+        try root.children.append(A, h);
+    }
+    {
+        var p = ASTNode.init(A, NodeType.Content);
+        p.content = "This is **nice**.";
+        try root.children.append(A, p);
+    }
+
+    const html = try exportHtml(&root, A);
+    defer A.free(html);
+
+    try std.testing.expect(std.mem.indexOf(u8, html, "data-docz=\"default-floor\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html, "/* docz-default-floor */") != null);
 }

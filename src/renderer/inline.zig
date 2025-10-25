@@ -31,14 +31,17 @@ fn isSpace(c: u8) bool {
     return c == ' ' or c == '\t' or c == '\n' or c == '\r';
 }
 
+fn isAllWhitespace(s: []const u8) bool {
+    for (s) |c| {
+        if (!isSpace(c)) return false;
+    }
+    return true;
+}
+
 fn skipSpacesAndCommas(s: []const u8, start: usize) usize {
     var j = start;
     while (j < s.len and (s[j] == ' ' or s[j] == '\t' or s[j] == '\n' or s[j] == '\r' or s[j] == ',')) : (j += 1) {}
     return j;
-}
-
-fn classLooksLikeCss(s: []const u8) bool {
-    return std.mem.indexOfScalar(u8, s, ':') != null or std.mem.indexOfScalar(u8, s, ';') != null or std.mem.indexOfScalar(u8, s, '=') != null;
 }
 
 fn findClosingParenQuoteAware(s: []const u8, start: usize) ?usize {
@@ -314,6 +317,114 @@ fn rewriteBackticks(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Emphasis (**bold**, *italic*) — skip inside <code>…</code>
+// ─────────────────────────────────────────────────────────────
+
+fn emphasizeSegment(A: std.mem.Allocator, seg: []const u8) ![]u8 {
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(A);
+
+    var i: usize = 0;
+    while (i < seg.len) : (i += 1) {
+        if (seg[i] == '\\' and i + 1 < seg.len) {
+            // simple escapes
+            try out.append(A, seg[i + 1]);
+            i += 1;
+            continue;
+        }
+
+        // strong: **...**
+        if (seg[i] == '*' and i + 1 < seg.len and seg[i + 1] == '*') {
+            const start = i + 2;
+            var j = start;
+            var consumed = false;
+            while (j + 1 < seg.len) : (j += 1) {
+                if (seg[j] == '*' and seg[j + 1] == '*') {
+                    const inner = seg[start..j];
+                    if (!isAllWhitespace(inner)) {
+                        try out.appendSlice(A, "<strong>");
+                        try out.appendSlice(A, inner);
+                        try out.appendSlice(A, "</strong>");
+                        i = j + 1; // loop ++ → j+2
+                        consumed = true;
+                    }
+                    break;
+                }
+            }
+            if (consumed) continue;
+            // no closing: emit literally
+            try out.append(A, '*');
+            try out.append(A, '*');
+            i = start - 1;
+            continue;
+        }
+
+        // em: *...*
+        if (seg[i] == '*') {
+            const start = i + 1;
+            var j = start;
+            var consumed = false;
+            while (j < seg.len) : (j += 1) {
+                if (seg[j] == '*') {
+                    const inner = seg[start..j];
+                    if (!isAllWhitespace(inner)) {
+                        try out.appendSlice(A, "<em>");
+                        try out.appendSlice(A, inner);
+                        try out.appendSlice(A, "</em>");
+                        i = j; // loop ++ → j+1
+                        consumed = true;
+                    }
+                    break;
+                }
+            }
+            if (consumed) continue;
+            // no closing: emit literally
+            try out.append(A, '*');
+            i = start - 1;
+            continue;
+        }
+
+        try out.append(A, seg[i]);
+    }
+
+    return out.toOwnedSlice(A);
+}
+
+fn rewriteEmphasis(A: std.mem.Allocator, s: []const u8) ![]u8 {
+    // Don’t touch inside <code>…</code>. We split on those blocks and process others.
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(A);
+
+    var i: usize = 0;
+    while (i < s.len) {
+        const code_open = std.mem.indexOfPos(u8, s, i, "<code>");
+        if (code_open == null) {
+            const seg = try emphasizeSegment(A, s[i..]);
+            defer A.free(seg);
+            try out.appendSlice(A, seg);
+            break;
+        }
+        const open = code_open.?;
+        // write emphasized chunk before code
+        const seg1 = try emphasizeSegment(A, s[i..open]);
+        defer A.free(seg1);
+        try out.appendSlice(A, seg1);
+
+        // copy <code>…</code> as-is
+        const close = std.mem.indexOfPos(u8, s, open + "<code>".len, "</code>") orelse {
+            // no closing; just copy rest
+            try out.appendSlice(A, s[open..]);
+            return out.toOwnedSlice(A);
+        };
+        try out.appendSlice(A, s[open .. close + "</code>".len]);
+
+        i = close + "</code>".len;
+    }
+
+    return out.toOwnedSlice(A);
+}
+
+// ─────────────────────────────────────────────────────────────
 // <span ...> builder
 // ─────────────────────────────────────────────────────────────
 
@@ -332,12 +443,9 @@ fn renderSpanOpenFromAttrs(
         if (style_val) |v| allocator.free(v);
     }
 
+    // deterministic mapping
     if (attrs.class_attr) |raw_class| {
-        if (classLooksLikeCss(raw_class)) {
-            style_val = try escapeHtmlAttr(allocator, raw_class);
-        } else {
-            class_val = try escapeHtmlAttr(allocator, raw_class);
-        }
+        class_val = try escapeHtmlAttr(allocator, raw_class);
     } else if (attrs.name) |nm| {
         if (aliases.get(nm)) |resolved| {
             class_val = try escapeHtmlAttr(allocator, resolved);
@@ -540,21 +648,30 @@ pub fn renderInline(
     raw: []const u8,
     aliases: *const std.StringHashMap([]const u8),
 ) ![]u8 {
+    // Order matters:
+    // 1) Code spans first — protects literal text from later passes.
     const step1 = try rewriteBackticks(allocator, raw);
     defer allocator.free(step1);
 
+    // 2) Inline styles next — they don't conflict with link parsing.
     const step2 = try rewriteInlineStyles(allocator, step1, aliases);
     defer allocator.free(step2);
 
+    // 3) Links on the raw-ish text (still has **…** in the label).
+    //    We *don’t* escape away markup yet so emphasis can still see **…**.
     const step3 = try rewriteLinks(allocator, step2);
-    return step3;
+    defer allocator.free(step3);
+
+    // 4) Emphasis last — now it can render <strong>/<em> *inside* <a>…</a>.
+    const step4 = try rewriteEmphasis(allocator, step3);
+    return step4;
 }
 
 // ─────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────
 
-test "inline: backticks and links and style shorthand" {
+test "inline: backticks, emphasis, links, style shorthand" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(gpa.deinit() == .ok);
     const A = gpa.allocator();
@@ -571,18 +688,20 @@ test "inline: backticks and links and style shorthand" {
     try aliases.put(try A.dupe(u8, "note"), try A.dupe(u8, "rounded bg-yellow-50 px-2"));
 
     const s =
-        \\Use `code` and a [link](https://ziglang.org).
+        \\Use **bold**, *italic*, `code`, and a [link](https://ziglang.org).
         \\ @(name="note"){nice}
     ;
     const out = try renderInline(A, s, &aliases);
     defer A.free(out);
 
+    try std.testing.expect(std.mem.indexOf(u8, out, "<strong>bold</strong>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "<em>italic</em>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "<code>code</code>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "<a href=\"https://ziglang.org\">link</a>") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "<span class=\"rounded bg-yellow-50 px-2\">nice</span>") != null);
 }
 
-test "inline: explicit @style(... ) content @end is rewritten (class→style heuristic)" {
+test "inline: explicit @style(... ) content @end renders class when class: is used" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(gpa.deinit() == .ok);
     const A = gpa.allocator();
@@ -594,10 +713,10 @@ test "inline: explicit @style(... ) content @end is rewritten (class→style heu
     const out = try renderInline(A, s, &aliases);
     defer A.free(out);
 
-    try std.testing.expect(std.mem.indexOf(u8, out, "The <span style=\"color = red\">preview </span> server.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "The <span class=\"color = red\">preview </span> server.") != null);
 }
 
-test "inline: explicit with &quot; decodes and rewrites" {
+test "inline: explicit with &quot; decodes and renders class when class: is used" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer std.debug.assert(gpa.deinit() == .ok);
     const A = gpa.allocator();
@@ -609,7 +728,7 @@ test "inline: explicit with &quot; decodes and rewrites" {
     const out = try renderInline(A, s, &aliases);
     defer A.free(out);
 
-    try std.testing.expect(std.mem.indexOf(u8, out, "<span style=\"color = red\">preview </span>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "<span class=\"color = red\">preview </span>") != null);
 }
 
 test "inline: shorthand paren with quoted brace content" {
@@ -639,5 +758,20 @@ test "inline: currency $4.39 is not touched" {
     defer A.free(out);
 
     try std.testing.expect(std.mem.eql(u8, out, s));
+    aliases.deinit();
+}
+
+test "inline: emphasis inside link text works" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const A = gpa.allocator();
+
+    var aliases = std.StringHashMap([]const u8).init(A);
+
+    const s = "A [**bold** link](https://example.com).";
+    const out = try renderInline(A, s, &aliases);
+    defer A.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "<a href=\"https://example.com\"><strong>bold</strong> link</a>") != null);
     aliases.deinit();
 }
