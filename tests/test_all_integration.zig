@@ -9,7 +9,9 @@ comptime {
     _ = @import("integration/latex_roundtrip.zig");
     _ = @import("integration/vendor_verify.zig");
     _ = @import("integration/web_preview_routes.zig");
-    _ = @import("integration/web_preview_http_features.zig");
+    _ = @import("integration/web_preview_http_features.zig"); // <--- THESE THREE BREAK
+    // _ = @import("integration/web_preview_http_range_headers.zig");
+    // = @import("integration/web_preview_mime_wasm.zig");
 }
 
 test {

@@ -375,12 +375,23 @@ pub fn build(b: *std.Build) void {
     // ─────────────────────────────────────────────
     // Integration tests (aggregate runner pattern)
     // ─────────────────────────────────────────────
+
+    // These are reusable APIs for the integration & e2e tests
+    const test_net_mod = b.createModule(.{
+        .root_source_file = b.path("tests/support/net.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    test_net_mod.addImport("web_preview", web_preview_mod);
+
     const integration_module = b.createModule(.{
         .root_source_file = b.path("tests/test_all_integration.zig"),
         .target = target,
         .optimize = optimize,
     });
     integration_module.addOptions("build_options", build_opts);
+    integration_module.addImport("test_net", test_net_mod);
     integration_module.addImport("docz", docz_module);
     integration_module.addImport("html_import", html_import_mod);
     integration_module.addImport("html_export", html_export_mod);
@@ -417,6 +428,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     e2e_module.addOptions("build_options", build_opts);
+    e2e_module.addImport("test_net", test_net_mod);
     e2e_module.addImport("docz", docz_module);
     e2e_module.addImport("web_preview_limits", web_preview_limits_mod);
     e2e_module.addImport("web_preview_timeout", web_preview_timeout_mod);

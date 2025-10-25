@@ -1,5 +1,4 @@
 const std = @import("std");
-const server_mod = @import("web_preview");
 const utils_fs = @import("utils_fs");
 const web = @import("web_preview");
 
@@ -169,12 +168,12 @@ test "preview serves third_party assets" {
     defer A.free(asset_path);
 
     // Start the preview server
-    var srv = try server_mod.PreviewServer.init(A, ".");
+    var srv = try web.PreviewServer.init(A, ".");
     defer srv.deinit(); // ensure resources are released even if test fails
 
     const port: u16 = try web.findFreePort();
     // Keep the thread handle so we can join it at teardown.
-    var th = try std.Thread.spawn(.{}, server_mod.PreviewServer.listenAndServe, .{ &srv, port });
+    var th = try std.Thread.spawn(.{}, web.PreviewServer.listenAndServe, .{ &srv, port });
     defer th.join();
 
     // Actively wait for the TCP listener

@@ -291,6 +291,25 @@ pub fn findFreePort() !u16 {
     return error.AddressInUse;
 }
 
+/// Test helper: actively wait until a TCP listener is accepting on 127.0.0.1:port.
+/// Returns when a short connect succeeds, or errors after `budget_ms`.
+pub fn waitForPort(port: u16, budget_ms: u64) !void {
+    const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
+    const deadline: i64 = std.time.milliTimestamp() + @as(i64, @intCast(budget_ms));
+
+    while (std.time.milliTimestamp() < deadline) {
+        const try_connect = std.net.tcpConnectToAddress(addr);
+        if (try_connect) |sock| {
+            sock.close(); // success => listener is up
+            return;
+        } else |_| {
+            // best-effort: small backoff and retry
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+        }
+    }
+    return error.PortNotReady;
+}
+
 // ----------------------------
 // Preview server
 // ----------------------------
@@ -301,6 +320,8 @@ pub const PreviewServer = struct {
     broadcaster: hot.Broadcaster,
     stop_requested: bool = false, // TEST-ONLY stop flag to exit the accept loop gracefully
     log_mode: LogMode = .plain,
+    // joinable handle for the background hot-reload poller
+    poll_thread: ?std.Thread = null,
 
     pub fn init(allocator: std.mem.Allocator, doc_root: []const u8) !PreviewServer {
         const trimmed = try trimTrailingSlash(allocator, doc_root);
@@ -314,6 +335,9 @@ pub const PreviewServer = struct {
     }
 
     pub fn deinit(self: *PreviewServer) void {
+        // signal background poller to exit and join it before tearing down deps
+        self.stop_requested = true;
+        if (self.poll_thread) |t| t.join();
         self.broadcaster.deinit();
         self.allocator.free(self.doc_root);
     }
@@ -376,8 +400,12 @@ pub const PreviewServer = struct {
             }
         }
 
-        // Hot-reload poller (best-effort)
-        _ = std.Thread.spawn(.{}, pollFileAndBroadcast, .{ &self.broadcaster, "docs/SPEC.dcz", 250 }) catch {};
+        // Hot-reload poller (cooperative, joins on deinit)
+        self.poll_thread = std.Thread.spawn(
+            .{},
+            pollFileAndBroadcast,
+            .{ self, "docs/SPEC.dcz", 250 },
+        ) catch null;
 
         while (true) {
             const net_conn = tcp.accept() catch |e| switch (e) {
@@ -933,14 +961,21 @@ fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return std.fs.cwd().readFileAlloc(path, allocator, @enumFromInt(1 << 26));
 }
 
-fn pollFileAndBroadcast(b: *hot.Broadcaster, path: []const u8, ms: u64) !void {
+fn pollFileAndBroadcast(srv: *PreviewServer, path: []const u8, ms: u64) void {
     var last: u64 = 0;
-    while (true) {
+
+    while (!srv.stop_requested) {
+        // Best-effort mtime read; treat errors as "no change".
         const mt = fileMtime(path) catch 0;
+
         if (mt != 0 and mt != last) {
-            if (last != 0) try b.broadcast("reload", path);
+            if (last != 0) {
+                // Fire-and-forget; do not kill the thread on broadcast errors.
+                srv.broadcaster.broadcast("reload", path) catch {};
+            }
             last = mt;
         }
+
         std.Thread.sleep(ms * std.time.ns_per_ms);
     }
 }

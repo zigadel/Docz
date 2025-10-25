@@ -86,12 +86,11 @@ test "docz preview CLI smoke: starts, serves /healthz, stops" {
         _ = child.wait() catch {};
     }
 
-    // Give the server a brief moment to bind
-    std.Thread.sleep(200 * std.time.ns_per_ms);
+    try web.waitForPort(port, 1000);
 
     // Probe /healthz (retry once if we raced the bind)
     const resp = httpGet(port, "/healthz", A) catch blk: {
-        std.Thread.sleep(250 * std.time.ns_per_ms);
+        std.Thread.sleep(25 * std.time.ns_per_ms);
         break :blk try httpGet(port, "/healthz", A);
     };
     defer A.free(resp);
